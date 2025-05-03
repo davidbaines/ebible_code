@@ -161,27 +161,8 @@ def book_id_to_number(id: str) -> int:
     return BOOK_NUMBERS.get(id.upper(), 0)
 
 
-def get_books(books: Union[str, List[str]]) -> Set[int]:
-    if isinstance(books, str):
-        books = books.split(",")
-    book_set: Set[int] = set()
-    for book_id in books:
-        book_id = book_id.strip().strip("*").upper()
-        if book_id == "NT":
-            book_set.update(range(40, 67))
-        elif book_id == "OT":
-            book_set.update(range(40))
-        else:
-            book_num = book_id_to_number(book_id)
-            if book_num is None:
-                raise RuntimeError("A specified book Id is invalid.")
-            book_set.add(book_num)
-    return book_set
-
-
 def is_nt(book_num: int) -> bool:
     return book_num >= 40 and book_num < 67
-
 
 def is_ot(book_num: int) -> bool:
     return book_num < 40
@@ -194,15 +175,8 @@ def is_ot_nt(book_num: int) -> bool:
 def is_book_id_valid(book_id: str) -> bool:
     return book_id_to_number(book_id) > 0
 
-
-def is_canonical(book: Union[str, int]) -> bool:
-    if isinstance(book, int):
-        book = book_number_to_id(book)
-    return is_book_id_valid(book) and book not in NON_CANONICAL_IDS
-
-
-def get_destination_file_from_book(file, add_project=True):
-    project_name = file.parent.name
+def get_destination_file_from_book(file, add_isocode=True):
+    isocode = file.parent.name[:3]
     book = None
     for BOOK_ID in ALL_BOOK_IDS:
         if BOOK_ID in file.name:
@@ -214,8 +188,8 @@ def get_destination_file_from_book(file, add_project=True):
         # Add one to NT and DC book numbers:
         if not is_ot(book_number):
             book_number += 1
-        if add_project:
-            new_filename = f"{book_number:02}{book}{project_name}.SFM"
+        if add_isocode:
+            new_filename = f"{book_number:02}{book}{isocode}.SFM"
         else:
             new_filename = f"{book_number:02}{book}.SFM"
 

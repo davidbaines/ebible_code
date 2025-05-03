@@ -233,8 +233,8 @@ def main():
             'sourceDate', 'licence_ID', 'licence_File', 'licence_Language',
             'licence_Dialect', 'licence_Vernacular_Title', 'licence_Licence_Type',
             'licence_Licence_Version', 'licence_CC_Licence_Link', 'licence_Copyright_Holder',
-            'licence_Copyright_Years', 'licence_Translation_by'
-            # Exclude status_* columns unless specifically needed by users
+            'licence_Copyright_Years', 'licence_Translation_by', 'status_versification',
+            'status_inferred_versification' # Added the new column
         ]
         # Ensure only existing columns are selected
         relevant_metadata_columns = [col for col in relevant_metadata_columns if col in final_metadata_df.columns]

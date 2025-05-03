@@ -1,20 +1,16 @@
-import codecs  # Needed for opening files with specific encoding
-import re
-import shutil
+import codecs
 import textwrap
 from datetime import datetime
 from glob import iglob
 from os import listdir
 from pathlib import Path
-from typing import Iterator  # Import Iterator
+from typing import Iterator, Tuple
+import xml.etree.ElementTree as ET
+import re
 
 import yaml
 from machine.corpora import ParatextTextCorpus, extract_scripture_corpus
 from machine.scripture.verse_ref import VerseRef
-
-# Import Versification if needed
-# from machine.scripture.versification import Versification
-# FHS = Versification.get_builtin("FHS")  # Or load your desired default .vrs file
 
 vrs_to_num: dict[str, int] = {
     "Original": 1,
@@ -31,139 +27,12 @@ EXCLUDE_ALPHANUMERICS = r"[^\w]"
 
 POST_PART = r"[a-z].+"
 
-
-# Should not need to duplicate this function in ebible.py and here.
 def log_and_print(file, s, type="Info") -> None:
     with open(file, "a") as log:
         log.write(
             f"{type.upper()}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {s}\n"
         )
     print(s)
-
-
-def get_extracted_projects(dir_extracted):
-    extracted = []
-    for line in listdir(dir_extracted):
-        m = re.search(r".+-(.+).txt$", line)
-        if m:
-            extracted.append(m.group(1))
-
-    return extracted
-
-
-def get_books_type(files):
-    for book in files:
-        m = re.search(r".*GEN|JON.*", book)
-        if m:
-            return "OT+NT"
-    return "NT"
-
-
-def conclude_versification_from_OT(dan_3, dan_5, dan_13):
-    if dan_3 == 30:
-        versification = "4"  # English
-    elif dan_3 == 33 and dan_5 == 30:
-        versification = "1"  # Original
-    elif dan_3 == 33 and dan_5 == 31:
-        versification = "5"  # Russian Protestant
-    elif dan_3 == 97:
-        versification = "2"  # Septuagint
-    elif dan_3 == 100:
-        if dan_13 == 65:
-            versification = "3"  # Vulgate
-        else:
-            versification = "6"  # Russian Orthodox
-    else:
-        versification = ""
-
-    return versification
-
-
-def conclude_versification_from_NT(jhn_6, act_19, rom_16):
-    if jhn_6 == 72:
-        versification = "3"  # Vulgate
-    elif act_19 == 41:
-        versification = "4"  # English
-    elif rom_16 == 24:
-        versification = "6"  # Russian Orthodox (same as Russian Protestant)
-    elif jhn_6 == 71 and act_19 == 40:
-        versification = "1"  # Original (Same as Septuagint)
-    else:
-        versification = ""
-
-    return versification
-
-
-def get_last_verse(project, book, chapter):
-    ch = str(chapter)
-
-    for book_file in iglob(f"{project}/*{book}*"):
-        last_verse = "0"
-        try:
-            f = codecs.open(book_file, "r", encoding="utf-8", errors="ignore")
-        except Exception as e:
-            log_and_print(logfile, f"Could not open {book_file}, reason:  {e}")
-            continue
-        try:
-            in_chapter = False
-            for line in f:
-                m = re.search(r"\\c ? ?([0-9]+).*", line)
-                if m:
-                    if m.group(1) == ch:
-                        in_chapter = True
-                    else:
-                        in_chapter = False
-
-                m = re.search(r"\\v ? ?([0-9]+).*", line)
-                if m:
-                    if in_chapter:
-                        last_verse = m.group(1)
-        except Exception as e:
-            log_and_print(
-                logfile, f"Something went wrong in reading {book_file}, reason:  {e}"
-            )
-            return None
-        try:
-            return int(last_verse)
-        except Exception as e:
-            print(
-                f"Could not convert {last_verse} into an integer in {book_file}, reason:  {e}"
-            )
-            return None
-
-
-def get_checkpoints_OT(project):
-    dan_3 = get_last_verse(project, "DAN", 3)
-    dan_5 = get_last_verse(project, "DAN", 5)
-    dan_13 = get_last_verse(project, "DAN", 13)
-
-    return dan_3, dan_5, dan_13
-
-
-def get_checkpoints_NT(project):
-    jhn_6 = get_last_verse(project, "JHN", 6)
-    act_19 = get_last_verse(project, "ACT", 19)
-    rom_16 = get_last_verse(project, "ROM", 16)
-
-    return jhn_6, act_19, rom_16
-
-
-def get_versification(project):
-    versification = ""
-    books = get_books_type(listdir(project))
-
-    if books == "OT+NT":
-        dan_3, dan_5, dan_13 = get_checkpoints_OT(project)
-        versification = conclude_versification_from_OT(dan_3, dan_5, dan_13)
-
-    if not versification:
-        jhn_6, act_19, rom_16 = get_checkpoints_NT(project)
-        versification = conclude_versification_from_NT(jhn_6, act_19, rom_16)
-
-    if versification != "":
-        return versification
-    else:
-        return "4"  # English
 
 
 def add_settings_file(project_folder, language_code):
@@ -206,6 +75,7 @@ def check_vref(
     param ruled_out: the list of versifications that have been ruled out
     return: the list of possible versifications and the list of versifications that have been ruled out
     """
+    # print(f"  check_vref: Checking {prev} against {len(versifications)} possibilities: {versifications}") # Optional: Very verbose
     try:
         curr = vrs_diffs[prev.book]["last_chapter"]
         key = prev.chapter_num
@@ -225,10 +95,12 @@ def check_vref(
         if num != key:
             for versif in versifs:
                 if not versif in ruled_out:
+                    # print(f"    check_vref: Ruling out {versif} (based on other verses in chapter/book)") # Optional
                     ruled_out.append(versif)
     to_remove = []
     for versif in curr_versifications:
         if versif in ruled_out:
+            # print(f"    check_vref: Removing {versif} (already ruled out)") # Optional
             to_remove.append(versif)
     for versif in to_remove:
         curr_versifications.remove(versif)
@@ -244,50 +116,13 @@ def get_book_names(project_folder: Path) -> list[str]:
     return: a list of book names with their corresponding file names
     """
     names = []
-    books = (book for book in listdir(project_folder) if ".usfm" in book)
+    books = (book.name for book in project_folder.glob("*.SFM"))
     for book in books:
         name = re.sub(BOOK_NUM, "", book)
         name = re.sub(EXCLUDE_ALPHANUMERICS, "", name)
         name = re.sub(POST_PART, "", name)
         names.append((name, book))
     return names
-
-
-def write_temp_settings_file(project_folder: Path, post_part: str) -> None:
-    """
-    writes a temporary settings file as a place holder to be able to determine the versification
-    param project_folder: the path to the project folder
-    """
-    with open(project_folder / "Settings.xml", "w", encoding="utf-8") as set_file:
-        set_file.write(
-            f"""<ScriptureText>
-            <BiblicalTermsListSetting>Major::BiblicalTerms.xml</BiblicalTermsListSetting>
-            <Naming BookNameForm="46-MAT" PostPart="{post_part}.usfm" PrePart="" />
-            </ScriptureText>"""
-        )
-
-
-def get_corpus(
-    project_folder: Path, vrs_diffs: dict[str, dict[int, dict[int, list[str]]]]
-) -> list[tuple[str, VerseRef, VerseRef]]:
-    """
-    creates a corpus of books found in vrs_diffs
-    param project_folder: the path to the project folder
-    param vrs_diffs: the list of differences in the versifications
-    return: the corpus from the available books in the specified bible
-    """
-    vrs_path = project_folder / "versification"
-    vrs_path.mkdir(parents=True, exist_ok=True)
-    book_names = get_book_names(project_folder)
-    for name in book_names:
-        if name[0] in vrs_diffs.keys():
-            shutil.copyfile(project_folder / name[1], vrs_path / name[1])
-    write_temp_settings_file(vrs_path, project_folder.name)
-    corpus = ParatextTextCorpus(vrs_path)
-    lines = list(extract_scripture_corpus(corpus, corpus))
-    shutil.rmtree(vrs_path)
-
-    return lines
 
 
 def stream_verse_refs_from_file(usfm_path: Path, book_code: str) -> Iterator[VerseRef]:
@@ -301,11 +136,16 @@ def stream_verse_refs_from_file(usfm_path: Path, book_code: str) -> Iterator[Ver
     Yields:
         VerseRef: A VerseRef object for each verse found in the file.
     """
+    # Use English versification for parsing verse strings.
+    # The specific versification system used for parsing doesn't affect the
+    # book/chapter/verse numbers needed by check_vref.
+    parser_vrs = Versification.get_instance("English")
+
     current_chapter = 0
     try:
-        # Use codecs.open for robust encoding handling, similar to get_last_verse
+        # Use codecs.open for robust encoding handling
         with codecs.open(usfm_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 # Check for chapter marker
                 chapter_match = re.search(r"\\c\s+(\d+)", line)
                 if chapter_match:
@@ -313,42 +153,38 @@ def stream_verse_refs_from_file(usfm_path: Path, book_code: str) -> Iterator[Ver
                         current_chapter = int(chapter_match.group(1))
                     except ValueError:
                         # Handle cases where chapter number isn't a valid int
-                        # Log this? For now, we'll skip lines until the next valid \c
-                        current_chapter = 0
-                        # Consider logging a warning here if needed
-                        # log_and_print(logfile, f"Warning: Invalid chapter marker in {usfm_path}: {line.strip()}", "Warn")
+                        print(f"Warning: Invalid chapter marker in {usfm_path} line {line_num}: {line.strip()}")
+                        current_chapter = 0 # Reset chapter until next valid \c
                     continue  # Move to the next line after finding a chapter
 
                 # Check for verse marker only if we have a valid current chapter
                 if current_chapter > 0:
+                    # Match verse number, potentially handling ranges like 1-2 or segments like 1a
+                    # For versification check, we only care about the starting verse number.
                     verse_match = re.search(r"\\v\s+(\d+)", line)
                     if verse_match:
                         try:
                             verse_num = int(verse_match.group(1))
                             # Create and yield the VerseRef object
                             vref = VerseRef.from_string(
-                                f"{book_code} {current_chapter}:{verse_num}", FHS
-                            )  # Assuming FHS is the default versification system object
+                                f"{book_code} {current_chapter}:{verse_num}", parser_vrs
+                            )
                             yield vref
                         except ValueError:
                             # Handle cases where verse number isn't a valid int
-                            # Log this? For now, we skip this verse marker
-                            # Consider logging a warning here if needed
-                            # log_and_print(logfile, f"Warning: Invalid verse marker in {usfm_path}: {line.strip()}", "Warn")
-                            pass
+                            print(f"Warning: Invalid verse marker in {usfm_path} line {line_num}: {line.strip()}")
                         except Exception as e_vref:
                             # Catch potential errors during VerseRef creation
-                            # log_and_print(logfile, f"Error creating VerseRef for {book_code} {current_chapter}:{verse_match.group(1)} in {usfm_path}: {e_vref}", "Error")
-                            pass
+                            print(f"Error creating VerseRef for {book_code} {current_chapter}:{verse_match.group(1)} in {usfm_path}: {e_vref}")
 
     except FileNotFoundError:
         # Handle case where the file doesn't exist
-        # log_and_print(logfile, f"Error: File not found {usfm_path}", "Error")
-        pass  # Or raise the error, depending on desired behavior
+        print(f"Error: File not found {usfm_path}")
+        # pass # Or raise the error, depending on desired behavior
     except Exception as e:
         # Handle other potential file reading errors
-        # log_and_print(logfile, f"Error reading file {usfm_path}: {e}", "Error")
-        pass  # Or raise
+        print(f"Error reading file {usfm_path}: {e}")
+        # pass # Or raise
 
 
 def get_versification(
@@ -356,17 +192,20 @@ def get_versification(
     vrs_diffs: dict[str, dict[int, dict[int, list[str]]]],
 ) -> str:
     """
-    gets the versification of the given bible
+    Gets the versification of the given bible by streaming USFM files directly.
     param project_folder: the path to the project folder
     param vrs_diffs: the list of differences in the versifications.
     return: the versification of the given bible
     """
-    return "English"  # Testing this code necessary
+    default_versification = "English"
+    print(f"\n--- get_versification for: {project_folder.name} ---") # Add project identifier
+
     versifications = list(vrs_to_num.keys())
     ruled_out = []
     processed_first_vref = False
     # Use VerseRef objects if possible, otherwise adapt check_vref
     prev_vref = None
+    print(f"  Initial versifications ({len(versifications)}): {versifications}")
 
     book_files = get_book_names(project_folder)  # List of (canonical_name, filename)
     file_map = {name: fname for name, fname in book_files}
@@ -391,10 +230,12 @@ def get_versification(
                         or vref.chapter_num != prev_vref.chapter_num
                     ):
                         if prev_vref:  # Ensure we have a valid previous verse
+                            print(f"  -> Chapter/Book change detected at {vref}. Checking {prev_vref}...")
                             versifications, ruled_out = check_vref(
                                 prev_vref, vrs_diffs, versifications, ruled_out
                             )
                             if len(versifications) == 1:
+                                print(f"  --> Determined: {versifications[0]} (during loop)")
                                 return versifications[
                                     0
                                 ]  # Found conclusive versification
@@ -403,12 +244,23 @@ def get_versification(
 
                     # Optional: Check current vref immediately if needed by logic?
                     # The original logic checked prev when chapter changed. Let's stick to that.
-
+                    print(f"  Finished book {book_code}. Remaining versifications: {versifications}")
+                else:
+                    print(f"  Skipping {book_code}: File not found at {usfm_path}")
+            # else: # Optional: Log if a book from vrs_diffs isn't in the project
+                # print(f"  Skipping {book_code}: Not found in project folder.")
+    
+    print(f"  Finished all relevant books.")            
     # Final check for the very last verse processed
     if prev_vref:  # Check if any verse was processed at all
+        print(f"  -> Final check for last processed verse: {prev_vref}")
         versifications, ruled_out = check_vref(
             prev_vref, vrs_diffs, versifications, ruled_out
         )
+    else:
+        # This case happens if no relevant books were found or no verses were streamed
+        print(f"  Warning: No verse references were processed for {project_folder.name}.")
+        # Keep the initial list if nothing was processed, let ambiguity logic handle it.
 
     if not versifications:
         # Fallback if no verses were processed or logic failed
@@ -424,48 +276,95 @@ def get_versification(
 def write_settings_file(
     project_folder: Path,
     language_code: str,
-    translation_id: str,
     vrs_diffs: dict[str, dict[int, dict[int, list[str]]]],
-) -> Path:
+) -> tuple[Path, int, dict, dict]: # Return path, vrs_num, old_settings, new_settings
     """
     Write a Settings.xml file to the project folder and overwrite any existing one.
     The file is very minimal containing only:
       <Versification> (which is inferred from the project)
       <LanguageIsoCode> (which is the first 3 characters of the folder name)
+      <Naming> (using BookNameForm="41MAT" and PostPart="{language_code}.SFM")
       <Naming> (which is the naming convention "MAT" indicating no digits prior to the 3 letter book code)
+      <FileNamePrePart> (which is the language code)
 
     When a settings file is created, the path to it is returned.
     Otherwise None is returned.
 
-    Note that the "Naming->PostPart" section will reflect the original naming scheme of the files in the original zip.
-    For example if the original zip was eng-web-c.zip, then the files inside will have names like MATeng-web-c.usfm,
-    even though for that language, we would have changed the project name to web_c
-    See also ebible.py `create_project_name` method, and rename_usfm.py and
-    https://github.com/BibleNLP/ebible/issues/50#issuecomment-2659064715
+    Note that the "Naming->PostPart" section will use {language_code}.SFM
+    Returns:
+        A tuple containing the path to the settings file and the inferred versification number.
+        A tuple containing:
+            - Path to the settings file (or None if failed)
+            - Inferred versification number (defaulting to 4)
+            - Dictionary of old settings values (or defaults if file missing/malformed)
+            - Dictionary of new settings values
     """
+    default_vrs_num = 4 # Default to English
+    settings_file = project_folder / "Settings.xml"
+    old_settings = {
+        "old_Versification": None,
+        "old_LanguageIsoCode": None,
+        "old_BookNameForm": None,
+        "old_PostPart": None,
+        "old_PrePart": None,
+    }
+    new_settings = {}
 
     # Add a Settings.xml file to a project folder.
     if project_folder.is_dir():
-        settings_file = project_folder / "Settings.xml"
+        # --- Read existing settings ---
+        if settings_file.exists():
+            try:
+                tree = ET.parse(settings_file)
+                root = tree.getroot()
+                old_settings["old_Versification"] = root.findtext("Versification")
+                old_settings["old_LanguageIsoCode"] = root.findtext("LanguageIsoCode")
+                naming = root.find("Naming")
+                if naming is not None:
+                    old_settings["old_BookNameForm"] = naming.get("BookNameForm")
+                    old_settings["old_PostPart"] = naming.get("PostPart")
+                    old_settings["old_PrePart"] = naming.get("PrePart")
+            except ET.ParseError:
+                print(f"Warning: Could not parse existing {settings_file}. Old values will be None.")
+            except Exception as e:
+                 print(f"Warning: Error reading existing {settings_file}: {e}. Old values will be None.")
 
-        versification = get_versification(project_folder, get_vrs_diffs())
-        vrs_num = vrs_to_num[versification]
+        # --- Determine new settings ---
+        try:
+            versification_name = get_versification(project_folder, vrs_diffs)
+            # Safely get the number, default to default_vrs_num if name not found or invalid
+            vrs_num = vrs_to_num.get(versification_name, default_vrs_num)
+            if not isinstance(vrs_num, int): # Ensure it's an integer
+                 print(f"Warning: Versification lookup for '{versification_name}' returned non-integer {vrs_num}. Defaulting to {default_vrs_num}.")
+                 vrs_num = default_vrs_num
+        except Exception as e:
+            print(f"Error during get_versification for {project_folder}: {e}. Defaulting versification to {default_vrs_num}.")
+            vrs_num = default_vrs_num
 
+        # Define new values for reporting
+        new_settings = {
+            "new_Versification": vrs_num,
+            "new_LanguageIsoCode": f"{language_code}:::",
+            "new_BookNameForm": "41MAT", # Consistent naming scheme
+            "new_PostPart": f"{language_code}.SFM",
+            "new_PrePart": "",
+        }
+
+        # --- Write new settings file ---
         setting_file_text = textwrap.dedent(
             f"""\
             <ScriptureText>
-                <Versification>{vrs_num}</Versification>
-                <LanguageIsoCode>{language_code}:::</LanguageIsoCode>
-                <Naming BookNameForm="41MAT" PostPart="{translation_id}.SFM" PrePart="" />
+                <Versification>{new_settings['new_Versification']}</Versification>
+                <LanguageIsoCode>{new_settings['new_LanguageIsoCode']}</LanguageIsoCode>
+                <Naming BookNameForm="{new_settings['new_BookNameForm']}" PostPart="{new_settings['new_PostPart']}" PrePart="{new_settings['new_PrePart']}" />
             </ScriptureText>"""
         )
-        # Note the closing """ is now unindented relative to the start for textwrap.dedent
-
         # Optional: Add a newline at the end if desired for POSIX compatibility
         setting_file_text += "\n"
 
         with open(settings_file, "w") as settings:
             settings.write(setting_file_text)
-        return settings_file
-    # Consider adding a return None or raising an error if project_folder is not a dir
-    return None  # Or raise an appropriate error
+        return settings_file, vrs_num, old_settings, new_settings
+    else:
+        # Project folder doesn't exist
+        return None, default_vrs_num, old_settings, new_settings # Return None path, default vrs, empty dicts

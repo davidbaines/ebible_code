@@ -19,7 +19,7 @@ import argparse
 import os
 import shutil
 import sys
-#from csv import DictReader  # Keep for potential future use? Maybe remove.
+
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from random import randint
@@ -30,10 +30,10 @@ import numpy as np
 import pandas as pd
 import regex
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup # Keep this import
 from dotenv import load_dotenv
 from rename_usfm import get_destination_file_from_book
-from settings_file import get_vrs_diffs, write_settings_file
+from settings_file import write_settings_file, get_versification, get_vrs_diffs
 from tqdm import tqdm
 
 global headers
@@ -66,7 +66,7 @@ STATUS_COLUMNS = [
     "status_download_path", "status_download_date", "status_unzip_path",
     "status_unzip_date", "status_extract_path", "status_extract_date",
      "status_extract_renamed_date",
-    "status_last_error"
+    "status_last_error", "status_inferred_versification" # Added new column
 ]
 
 # Add new licence tracking columns
@@ -76,7 +76,7 @@ LICENCE_COLUMNS = [
     "licence_CC_Licence_Link", "licence_Copyright_Holder", "licence_Copyright_Years",
     "licence_Translation_by", "licence_date_read" 
 ]
-
+# ALL_STATUS_COLUMNS is updated automatically by concatenating the lists
 ALL_STATUS_COLUMNS = ORIGINAL_COLUMNS + LICENCE_COLUMNS + STATUS_COLUMNS 
 
 # --- Utility Functions ---
@@ -597,7 +597,9 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
             rename_usfm(project_dir, logfile)
 
             # Write Settings.xml
-            write_settings_file(project_dir, lang_code, translation_id, vrs_diffs_data)
+             # Unpack all return values, even if old/new dicts aren't used here yet
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code, translation_id, vrs_diffs_data)
+            df.loc[index, 'status_inferred_versification'] = vrs_num # Store the inferred versification number
 
             # Extract Licence Details (only if needed or forced)
             if row['action_needed_licence']:
@@ -807,6 +809,7 @@ def rename_extracted_files(
 
     log_and_print(logfile, f"Attempting to rename {count} extracted files...")
     renamed_count = 0
+    target_file_exists_count = 0
     for index, row in tqdm(rename_candidates.iterrows(), total=count, desc="Renaming Extracts"):
         lang_code = row['languageCode']
         translation_id = row['translationId']
@@ -827,7 +830,8 @@ def rename_extracted_files(
 
         if silnlp_output_path.exists() and silnlp_output_path != target_path:
             if target_path.exists():
-                log_and_print(logfile, f"Warning: Target rename path {target_path} already exists. Skipping rename for {translation_id}.", log_type="Warn")
+                #log_and_print(logfile, f"Warning: Target rename path {target_path} already exists. Skipping rename for {translation_id}.", log_type="Warn")
+                target_file_exists_count += 1
             else:
                 try:
                     silnlp_output_path.rename(target_path)
@@ -846,10 +850,84 @@ def rename_extracted_files(
         # else: # File not found with expected SILNLP pattern
             # log_and_print(logfile, f"Could not find expected SILNLP output file {silnlp_output_path.name} for {translation_id}", log_type="Warn")
 
-    if renamed_count > 0:
+    if renamed_count :
         log_and_print(logfile, f"Finished renaming. Renamed {renamed_count} files.")
+
+    if target_file_exists_count:
+        log_and_print(logfile, f"Didn't rename {target_file_exists_count} files that already exist.")
     return df
 
+
+# --- Function for --update-settings mode ---
+
+def update_all_settings(
+    status_df: pd.DataFrame,
+    projects_folder: Path,
+    private_projects_folder: Path,
+    vrs_diffs: Dict,
+    logfile: Path
+) -> pd.DataFrame:
+    """
+    Iterates through project folders, regenerates Settings.xml, and updates status_df.
+    """
+    log_and_print(logfile, "--- Running in --update-settings mode ---")
+    settings_report_data = [] # List to store data for the CSV report
+    processed_folders = 0
+
+    # Ensure status_df has translationId as index for quick lookup
+    status_df_indexed = status_df.set_index('translationId', drop=False)
+
+    for base_folder in [projects_folder, private_projects_folder]:
+        log_and_print(logfile, f"Scanning folder: {base_folder}")
+        if not base_folder.is_dir():
+            log_and_print(logfile, f"Warning: Folder not found, skipping: {base_folder}", log_type="Warn")
+            continue
+
+        for project_dir in base_folder.iterdir():
+            if project_dir.is_dir():
+                processed_folders += 1
+                translation_id = project_dir.name
+                if translation_id in status_df_indexed.index:
+                    index = status_df_indexed.index.get_loc(translation_id) # Get integer index location
+                    row = status_df_indexed.iloc[index]
+                    lang_code = row['languageCode']
+                    if pd.isna(lang_code):
+                        log_and_print(logfile, f"Skipping {translation_id}: Missing languageCode in status file.", log_type="Warn")
+                        continue
+
+                    log_and_print(logfile, f"Updating settings for {translation_id} in {project_dir}")
+                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code, vrs_diffs)
+
+                    if settings_path:
+                        # Use the original DataFrame and integer index to update
+                        status_df.loc[status_df['translationId'] == translation_id, 'status_inferred_versification'] = vrs_num
+                        
+                        # Add data to report
+                        report_entry = {
+                            "translationId": translation_id,
+                            "settings_path": str(settings_path.resolve()),
+                            **old_vals,
+                            **new_vals,
+                        }
+                        settings_report_data.append(report_entry)
+                    else:
+                        log_and_print(logfile, f"Failed to write settings for {translation_id}", log_type="Error")
+                        status_df.loc[status_df['translationId'] == translation_id, 'status_last_error'] = "Settings update failed"
+                else:
+                    log_and_print(logfile, f"Skipping {project_dir}: No entry found in status file for translationId '{translation_id}'.", log_type="Warn")
+
+    # --- Write the settings update report ---
+    if settings_report_data:
+        report_df = pd.DataFrame(settings_report_data)
+        report_path = logfile.parent.parent / "metadata" / "settings_update.csv" # Place in metadata folder
+        try:
+            report_df.to_csv(report_path, index=False, encoding='utf-8')
+            log_and_print(logfile, f"Saved settings update report to {report_path}")
+        except Exception as e:
+            log_and_print(logfile, f"Error saving settings update report to {report_path}: {e}", log_type="Error")
+
+    log_and_print(logfile, f"--- Settings update complete. Processed {processed_folders} potential project folders. ---")
+    return status_df
 
 # --- Main Execution ---
 
@@ -872,12 +950,12 @@ def main() -> None:
         help="Include non-redistributable (private) translations.",
     )
     # --download_only might need rethinking with status file, maybe remove or adapt?
-    # parser.add_argument(
-    #     "--download_only", default=False, action="store_true",
-    #     help="Stop after downloading zip files.",
-    # )
     parser.add_argument(
-        "--max-age-days", default=None, type=int, # Default handled later
+        "--download_only", default=False, action="store_true",
+        help="Stop after downloading zip files.",
+    )
+    parser.add_argument(
+        "--max-age-days", default=None, type=int,
         help="Max age in days for downloaded/unzipped files before re-processing. Overrides .env.",
     )
     parser.add_argument(
@@ -887,6 +965,10 @@ def main() -> None:
     parser.add_argument(
         "--verse-threshold", default=400, type=int,
         help="Minimum total OT+NT verses required for a translation to be processed.",
+    )
+    parser.add_argument(
+        "--update-settings", default=False, action="store_true",
+        help="Run in a mode to only update Settings.xml for existing projects and exit.",
     )
     args: argparse.Namespace = parser.parse_args()
 
@@ -955,6 +1037,27 @@ def main() -> None:
     # --- Load or Initialize Status ---
     status_path = metadata_folder / STATUS_FILENAME
     status_df = initialize_or_load_status(status_path, translations_csv, logfile)
+
+    # --- Handle --update-settings mode ---
+    if args.update_settings:
+        vrs_diffs = get_vrs_diffs()
+        updated_status_df = update_all_settings(
+            status_df.copy(), # Pass a copy to avoid modifying original before save
+            projects_folder,
+            private_projects_folder,
+            vrs_diffs,
+            logfile
+        )
+        
+        # Save the updated status file
+        try: # Save status_df which was updated within update_all_settings
+            updated_status_df.to_csv(status_path, index=False)
+            log_and_print(logfile, f"\nSaved updated status after settings update to {status_path}")
+        except Exception as e:
+            log_and_print(logfile, f"Error saving status file {status_path} after settings update: {e}", log_type="Error")
+        # Print SILNLP commands and exit
+        print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder, logfile)
+        sys.exit(0)
 
     # --- Scan existing folders to update status if necessary---
     status_df = scan_and_update_status(
@@ -1040,11 +1143,10 @@ def main() -> None:
         log_and_print(logfile, f"Error saving status file {status_path}: {e}", log_type="Error")
 
     # --- Perform post-extraction renaming (Run again after save? Maybe not needed if run before save) ---
-    # status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder, logfile)
-    # status_df.to_csv(status_path, index=False) # Save again if run after initial save
+    # Renaming is now done before saving the main status_df update.
 
     # --- Report Missing Extracts ---
-    # Re-scan corpus folders to update extract dates one last time before reporting
+    # Re-scan folders to update status one last time before reporting
     status_df = scan_and_update_status(status_df, downloads_folder, projects_folder, private_projects_folder, corpus_folder, private_corpus_folder, logfile)
 
     missing_extracts_df = status_df[status_df['status_extract_date'].isna() & status_df['downloadable'] & ((status_df['OTverses'] + status_df['NTverses']) >= args.verse_threshold)]
@@ -1056,15 +1158,18 @@ def main() -> None:
         for index, row in missing_extracts_df.iterrows():
             log_and_print(logfile, f"  - {row['translationId']}: Expected at {row['status_extract_path']}", log_type="Warn")
     
-    # --- Final Info and Commands ---
-    
+    # --- Final Info ---
     log_and_print(logfile, "\nLicence Type Summary (Processed Translations):")
     # Filter actions_df for successfully processed ones if needed, or show all filtered
     log_and_print(logfile, actions_df['licence_Licence_Type'].value_counts(dropna=False))
 
+    # --- Print SILNLP Commands ---
+    print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder, logfile)
+
+def print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder, logfile):
     # Define extract log paths using the same suffix
     public_extract_log: Path = logs_folder / ("extract_public" + log_suffix)
-    private_extract_log: Path = logs_folder / ("extract_private" + log_suffix)
+    private_extract_log: Path = logs_folder / ("extract_private" + log_suffix)    
 
     log_and_print(
         logfile,
@@ -1079,7 +1184,6 @@ def main() -> None:
             "\n---------------------------------"
         ],
     )
-
 
 if __name__ == "__main__":
     main()

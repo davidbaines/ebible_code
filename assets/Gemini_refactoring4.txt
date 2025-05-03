@@ -1,0 +1,73 @@
+I would like to modify the get versification code so that it is more heuristic and therefore more robust. Versifications are more like guidelines or traditions than rules. Few Bibles actually follow a given Versification system perfectly.
+It's more the case that a versification can be written from any Bible and there are some well-known Bibles whose versification has been used by other translators.
+
+There are specifications for each. For example the vul.vrs 
+
+I've placed one of these vrs file for each versification, in the assets folder.
+
+Lines begining with # are comments. Some of the comments provide very useful information for understanding which books should be present. 
+The code isn't expected to read those, of course, but they may be useful to help a human make a decicion about which versification to use.
+Lines begining with a bookid list the number of verses in each chapter. This is the main data the script would need to parse and use.
+Some vrs files may not specify all books.  That would be a major clue that if the book is present in the Bible it probably isn't using a versification that omits that book.
+Some Bibles will have chapters that are not present in a given versification, again that would be a clue that that Bible isn't following that versification.
+We have to take into account the fact that many of the Bibles are not fully translated yet - so missing books are more likely because they are not yet translated.
+
+
+We could count the number of verses in each Bible. Then count how many of the Books, Chapters and Verses present are also present in each Versification.
+For the chapters that exist in the Bible we could count how many have exactly the correct number of verses as defined by each versification.
+For Books that exist in the Bible we can check whether those books are also in each versification.
+All these could then be combined in some way to give a score, for how similar the Bible is to each versification.
+
+Are there other things I'd need to consider here?
+Is any clarification required?
+
+
+
+# Versification  "Vulgate"
+# Version=1.5
+# 
+# this is for Bibles which follow the versification of the Vulgate, mainly Catholic Bibles
+# therefore this includes deuterocanonical books from Vulgate and Latin manuscripts
+# Vulgate projects in Paratext are VUL83 (Stuttgart text) and NVL98 (Nova Vulgata)
+#
+# mapping for XXA -> PSA has been deleted
+# XXB has been moved to LAO
+#
+# No mapping done for TOB, JDT and SIR, since they seem to follow another 'vorlage' than LXX
+# The versification of 2ES present here should become THE standard/original versification of this book! (Vulgate is 'the original' text of this book)
+#
+# List of books, chapters, verses
+# One line per book.
+# One entry for each chapter.
+# Verse number is the maximum verse number for that chapter.
+# See the lines containing ='s below for verse mappings.
+#
+#-----------------------------------------------------------
+# Old Testament
+GEN 1:31 2:25 3:24 4:26 5:32 6:22 7:24 8:22 9:29 10:32 11:32 12:20 13:18 14:24 15:21 16:16 17:27 18:33 19:38 20:18 21:34 22:24 23:20 24:67 25:34 26:35 27:46 28:22 29:35 30:43 31:55 32:32 33:20 34:31 35:29 36:43 37:36 38:30 39:23 40:23 41:57 42:38 43:34 44:34 45:28 46:34 47:31 48:22 49:32 50:25
+EXO 1:22 2:25 3:22 4:31 5:23 6:30 7:25 8:32 9:35 10:29 11:10 12:51 13:22 14:31 15:27 16:36 17:16 18:27 19:25 20:26 21:36 22:31 23:33 24:18 25:40 26:37 27:21 28:43 29:46 30:38 31:18 32:35 33:23 34:35 35:35 36:38 37:29 38:31 39:43 40:36
+LEV 1:17 2:16 3:17 4:35 5:19 6:30 7:38 8:36 9:24 10:20 11:47 12:8 13:59 14:57 15:33 16:34 17:16 18:30 19:37 20:27 21:24 22:33 23:44 24:23 25:55 26:45 27:34
+NUM 1:54 2:34 3:51 4:49 5:31 6:27 7:89 8:26 9:23 10:36 11:34 12:15 13:34 14:45 15:41 16:50 17:13 18:32 19:22 20:30 21:35 22:41 23:30 24:25 25:18 26:65 27:23 28:31 29:39 30:17 31:54 32:42 33:56 34:29 35:34 36:13
+DEU 1:46 2:37 3:29 4:49 5:33 6:25 7:26 8:20 9:29 10:22 11:32 12:32 13:18 14:29 15:23 16:22 17:20 18:22 19:21 20:20 21:23 22:30 23:25 24:22 25:19 26:19 27:26 28:68 29:29 30:20 31:30 32:52 33:29 34:12
+JOS 1:18 2:24 3:17 4:25 5:16 6:27 7:26 8:35 9:27 10:43 11:23 12:24 13:33 14:15 15:63 16:10 17:18 18:28 19:51 20:9 21:43 22:34 23:16 24:33
+JDG 1:36 2:23 3:31 4:24 5:32 6:40 7:25 8:35 9:57 10:18 11:40 12:15 13:25 14:20 15:20 16:31 17:13 18:31 19:30 20:48 21:24
+RUT 1:22 2:23 3:18 4:22
+1SA 1:28 2:36 3:21 4:22 5:12 6:21 7:17 8:22 9:27 10:27 11:15 12:25 13:23 14:52 15:35 16:23 17:58 18:30 19:24 20:43 21:15 22:23 23:28 24:23 25:44 26:25 27:12 28:25 29:11 30:31 31:13
+2SA 1:27 2:32 3:39 4:12 5:25 6:23 7:29 8:18 9:13 10:19 11:27 12:31 13:39 14:33 15:37 16:23 17:29 18:33 19:43 20:26 21:22 22:51 23:39 24:25
+1KI 1:53 2:46 3:28 4:34 5:18 6:38 7:51 8:66 9:28 10:29 11:43 12:33 13:34 14:31 15:34 16:34 17:24 18:46 19:21 20:43 21:29 22:54
+2KI 1:18 2:25 3:27 4:44 5:27 6:33 7:20 8:29 9:37 10:36 11:21 12:21 13:25 14:29 15:38 16:20 17:41 18:37 19:37 20:21 21:26 22:20 23:37 24:20 25:30
+1CH 1:54 2:55 3:24 4:43 5:26 6:81 7:40 8:40 9:44 10:14 11:46 12:40 13:14 14:17 15:29 16:43 17:27 18:17 19:19 20:7 21:30 22:19 23:32 24:31 25:31 26:32 27:34 28:21 29:30
+2CH 1:17 2:18 3:17 4:22 5:14 6:42 7:22 8:18 9:31 10:19 11:23 12:16 13:22 14:15 15:19 16:14 17:19 18:34 19:11 20:37 21:20 22:12 23:21 24:27 25:28 26:23 27:9 28:27 29:36 30:27 31:21 32:33 33:25 34:33 35:27 36:23
+EZR 1:11 2:70 3:13 4:24 5:17 6:22 7:28 8:36 9:15 10:44
+# EZR is for the Vulgate book called 1 Esdras
+NEH 1:11 2:20 3:31 4:23 5:19 6:19 7:73 8:18 9:38 10:39 11:36 12:46 13:31
+# NEH is for the Vulgate book called 2 Esdras
+#------------------------------------
+# In the Vulgate projects VUL83 Esther is the Greek Esther not Hebrew Esther, this definition is for Greek Esther. The book has been put under EST instead of ESG [Studge]
+# in VUL83 the definition of EST is
+#EST 1:22 2:23 3:15 4:17 5:14 6:14 7:10 8:17 9:32 10:13 11:12 12:6 13:18 14:19 15:19 16:24
+# in NVL98 Nova Vulgata the definition of EST is
+EST 1:32 2:23 3:15 4:47 5:28 6:14 7:10 8:41 9:32 10:13 
+# Note that chapter 3 v 15 is 15a-i
+# Note that chapter 4 v 47 is 17aa-kk
+#-----------------------------------

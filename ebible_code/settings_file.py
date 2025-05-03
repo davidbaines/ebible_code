@@ -1,16 +1,20 @@
 import codecs
 import textwrap
-from datetime import datetime
 from glob import iglob
 from os import listdir
 from pathlib import Path
 from typing import Iterator, Tuple
 import xml.etree.ElementTree as ET
+import logging # Import logging
 import re
 
 import yaml
 from machine.corpora import ParatextTextCorpus, extract_scripture_corpus
 from machine.scripture.verse_ref import VerseRef
+from machine.scripture.versification import Versification
+
+# Get logger for this module
+logger = logging.getLogger(__name__)
 
 vrs_to_num_string: dict[str, str] = {
     "Original": "1",
@@ -28,15 +32,6 @@ BOOK_NUM = r"[0-9].\-"
 EXCLUDE_ALPHANUMERICS = r"[^\w]"
 
 POST_PART = r"[a-z].+"
-
-def log_and_print(file, s, type="Info") -> None:
-    with open(file, "a") as log:
-        log.write(
-            f"{type.upper()}: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {s}\n"
-        )
-    print(s)
-
-
 def add_settings_file(project_folder, language_code):
     versification = get_versification(project_folder)
     setting_file_stub = f"""<ScriptureText>
@@ -77,7 +72,7 @@ def check_vref(
     param ruled_out: the list of versifications that have been ruled out
     return: the list of possible versifications and the list of versifications that have been ruled out
     """
-    # print(f"  check_vref: Checking {prev} against {len(versifications)} possibilities: {versifications}") # Optional: Very verbose
+    # logging.info(f"  check_vref: Checking {prev} against {len(versifications)} possibilities: {versifications}") # Optional: Very verbose
     try:
         curr = vrs_diffs[prev.book]["last_chapter"]
         key = prev.chapter_num
@@ -97,12 +92,12 @@ def check_vref(
         if num != key:
             for versif in versifs:
                 if not versif in ruled_out:
-                    # print(f"    check_vref: Ruling out {versif} (based on other verses in chapter/book)") # Optional
+                    # logging.info(f"    check_vref: Ruling out {versif} (based on other verses in chapter/book)") # Optional
                     ruled_out.append(versif)
     to_remove = []
     for versif in curr_versifications:
         if versif in ruled_out:
-            # print(f"    check_vref: Removing {versif} (already ruled out)") # Optional
+            # logging.info(f"    check_vref: Removing {versif} (already ruled out)") # Optional
             to_remove.append(versif)
     for versif in to_remove:
         curr_versifications.remove(versif)
@@ -143,20 +138,23 @@ def stream_verse_refs_from_file(usfm_path: Path, book_code: str) -> Iterator[Ver
     # book/chapter/verse numbers needed by check_vref.
     parser_vrs = Versification.get_instance("English")
 
+    logger.debug(f"    stream_verse_refs: Attempting to open {usfm_path}") # Use debug level
     current_chapter = 0
     try:
         # Use codecs.open for robust encoding handling
         with codecs.open(usfm_path, "r", encoding="utf-8", errors="ignore") as f:
             for line_num, line in enumerate(f, 1):
                 # Check for chapter marker
+                # if line_num < 10: logging.info(f"      Line {line_num}: {line.strip()}") # Debug: Print first few lines
                 chapter_match = re.search(r"\\c\s+(\d+)", line)
                 if chapter_match:
                     try:
                         current_chapter = int(chapter_match.group(1))
                     except ValueError:
                         # Handle cases where chapter number isn't a valid int
-                        print(f"Warning: Invalid chapter marker in {usfm_path} line {line_num}: {line.strip()}")
+                        logger.warning(f"Invalid chapter marker in {usfm_path} line {line_num}: {line.strip()}")
                         current_chapter = 0 # Reset chapter until next valid \c
+                    # logger.debug(f"      Found chapter: {current_chapter}") # Debug: Confirm chapter change
                     continue  # Move to the next line after finding a chapter
 
                 # Check for verse marker only if we have a valid current chapter
@@ -165,6 +163,7 @@ def stream_verse_refs_from_file(usfm_path: Path, book_code: str) -> Iterator[Ver
                     # For versification check, we only care about the starting verse number.
                     verse_match = re.search(r"\\v\s+(\d+)", line)
                     if verse_match:
+                        # logger.debug(f"      Found verse marker: {verse_match.group(1)}") # Debug: Confirm verse marker found
                         try:
                             verse_num = int(verse_match.group(1))
                             # Create and yield the VerseRef object
@@ -172,20 +171,21 @@ def stream_verse_refs_from_file(usfm_path: Path, book_code: str) -> Iterator[Ver
                                 f"{book_code} {current_chapter}:{verse_num}", parser_vrs
                             )
                             yield vref
+                            # logger.debug(f"      Yielded: {vref}") # Debug: Confirm yield
                         except ValueError:
                             # Handle cases where verse number isn't a valid int
-                            print(f"Warning: Invalid verse marker in {usfm_path} line {line_num}: {line.strip()}")
+                            logger.warning(f"Invalid verse marker in {usfm_path} line {line_num}: {line.strip()}")
                         except Exception as e_vref:
                             # Catch potential errors during VerseRef creation
-                            print(f"Error creating VerseRef for {book_code} {current_chapter}:{verse_match.group(1)} in {usfm_path}: {e_vref}")
+                            logger.error(f"Error creating VerseRef for {book_code} {current_chapter}:{verse_match.group(1)} in {usfm_path}: {e_vref}")
 
     except FileNotFoundError:
         # Handle case where the file doesn't exist
-        print(f"Error: File not found {usfm_path}")
+        logger.error(f"    stream_verse_refs: File not found {usfm_path}")
         # pass # Or raise the error, depending on desired behavior
     except Exception as e:
         # Handle other potential file reading errors
-        print(f"Error reading file {usfm_path}: {e}")
+        logger.error(f"    stream_verse_refs: Reading file {usfm_path}: {e}")
         # pass # Or raise
 
 
@@ -200,14 +200,15 @@ def get_versification(
     return: the versification of the given bible
     """
     default_versification = "English"
-    print(f"\n--- get_versification for: {project_folder.name} ---") # Add project identifier
+    logger.info(f"--- get_versification for: {project_folder.name} ---") # Use info level
 
     versifications = list(vrs_to_num_string.keys())
     ruled_out = []
     processed_first_vref = False
     # Use VerseRef objects if possible, otherwise adapt check_vref
     prev_vref = None
-    print(f"  Initial versifications ({len(versifications)}): {versifications}")
+    logger.info(f"  Initial versifications ({len(versifications)}): {versifications}") # Use info level
+    processed_any_verses = False # Flag to track if ANY verse was processed across all books
 
     book_files = get_book_names(project_folder)  # List of (canonical_name, filename)
     file_map = {name: fname for name, fname in book_files}
@@ -217,12 +218,16 @@ def get_versification(
         if book_code in file_map:
             usfm_path = project_folder / file_map[book_code]
             if usfm_path.is_file():
+                logger.info(f"  Processing book: {book_code} ({usfm_path.name})") # Use info level
+                processed_verses_in_book = False # Flag for current book
                 # Stream verse references directly from the original file
                 for vref in stream_verse_refs_from_file(
                     usfm_path, book_code
                 ):  # New helper function
+                    processed_verses_in_book = True # Mark that we got at least one verse
                     if not processed_first_vref:
                         prev_vref = vref
+                        processed_any_verses = True # Mark that we processed at least one verse overall
                         processed_first_vref = True
                         continue
 
@@ -232,12 +237,12 @@ def get_versification(
                         or vref.chapter_num != prev_vref.chapter_num
                     ):
                         if prev_vref:  # Ensure we have a valid previous verse
-                            print(f"  -> Chapter/Book change detected at {vref}. Checking {prev_vref}...")
-                            versifications, ruled_out = check_vref(
+                            logger.info(f"  -> Chapter/Book change detected at {vref}. Checking {prev_vref}...") # Use info level
+                            versifications, ruled_out = check_vref( # type: ignore
                                 prev_vref, vrs_diffs, versifications, ruled_out
                             )
                             if len(versifications) == 1:
-                                print(f"  --> Determined: {versifications[0]} (during loop)")
+                                logger.info(f"  --> Determined: {versifications[0]} (during loop)") # Use info level
                                 return versifications[
                                     0
                                 ]  # Found conclusive versification
@@ -246,28 +251,33 @@ def get_versification(
 
                     # Optional: Check current vref immediately if needed by logic?
                     # The original logic checked prev when chapter changed. Let's stick to that.
-                    print(f"  Finished book {book_code}. Remaining versifications: {versifications}")
-                else:
-                    print(f"  Skipping {book_code}: File not found at {usfm_path}")
-            # else: # Optional: Log if a book from vrs_diffs isn't in the project
-                # print(f"  Skipping {book_code}: Not found in project folder.")
-    
-    print(f"  Finished all relevant books.")            
+
+                # After the inner loop for the current book finishes:
+                if not processed_verses_in_book:
+                    logger.warning(f"  No verses streamed from {usfm_path.name}") # Use warning level
+                logger.info(f"  Finished book {book_code}. Remaining versifications: {versifications}") # Use info level
+
+            else: # This else belongs to 'if usfm_path.is_file():'
+                logger.warning(f"  Skipping {book_code}: File not found at {usfm_path}") # Use warning level
+        # else: # Optional: Log if a book from vrs_diffs isn't in the project folder
+                # logger.warning(f"  Skipping {book_code}: Not found in project folder.")
+
+    logger.info(f"  Finished all relevant books.")
     # Final check for the very last verse processed
-    if prev_vref:  # Check if any verse was processed at all
-        print(f"  -> Final check for last processed verse: {prev_vref}")
+    if processed_any_verses and prev_vref: # Check if any verse was processed overall
+        logger.info(f"  -> Final check for last processed verse: {prev_vref}") # Use info level
         versifications, ruled_out = check_vref(
-            prev_vref, vrs_diffs, versifications, ruled_out
+            prev_vref, vrs_diffs, versifications, ruled_out # type: ignore
         )
     else:
         # This case happens if no relevant books were found or no verses were streamed
-        print(f"  Warning: No verse references were processed for {project_folder.name}.")
-        # Keep the initial list if nothing was processed, let ambiguity logic handle it.
+        logging.warning(f"  Warning: No verse references were processed for {project_folder.name}.")
+        # Keep the initial list if nothing was processed, let ambiguity/default logic handle it below.
 
     if not versifications:
         # Fallback if no verses were processed or logic failed
         print(
-            f"Warning: Could not determine versification for {project_folder}, defaulting."
+            f"Warning: Could not determine versification for {project_folder.name}, defaulting."
         )
         # Default to English as per the old logic's fallback? Or the first in the list?
         return "4"
@@ -279,7 +289,7 @@ def write_settings_file(
     project_folder: Path,
     language_code: str,
     vrs_diffs: dict[str, dict[int, dict[int, list[str]]]],
-) -> tuple[Path, str, dict, dict]: # Return path, vrs_num_string, old_settings, new_settings
+) -> tuple[Path | None, str, dict, dict]: # Return path, vrs_num_string, old_settings, new_settings
     """
     Write a Settings.xml file to the project folder and overwrite any existing one.
     The file is very minimal containing only:
@@ -327,9 +337,9 @@ def write_settings_file(
                     old_settings["old_PostPart"] = naming.get("PostPart")
                     old_settings["old_PrePart"] = naming.get("PrePart")
             except ET.ParseError:
-                print(f"Warning: Could not parse existing {settings_file}. Old values will be None.")
+                logger.warning(f"Could not parse existing {settings_file}. Old values will be None.")
             except Exception as e:
-                 print(f"Warning: Error reading existing {settings_file}: {e}. Old values will be None.")
+                 logger.warning(f"Error reading existing {settings_file}: {e}. Old values will be None.")
 
         # --- Determine new settings ---
         versification_name = get_versification(project_folder, vrs_diffs)

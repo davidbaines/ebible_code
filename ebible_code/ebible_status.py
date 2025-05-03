@@ -548,7 +548,7 @@ def download_required_files(df: pd.DataFrame, base_url: str, folder: Path, logfi
     return df
 
 
-def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path, vrs_diffs_data: Dict, logfile: Path) -> pd.DataFrame:
+def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path, vrs_diffs: Dict, logfile: Path) -> pd.DataFrame:
     """Unzips, renames, creates settings, and extracts licence for required projects."""
     translations_to_unzip = df[df['action_needed_unzip']]
     count = len(translations_to_unzip)
@@ -598,7 +598,7 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
 
             # Write Settings.xml
              # Unpack all return values, even if old/new dicts aren't used here yet
-            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code, translation_id, vrs_diffs_data)
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code, vrs_diffs)
             df.loc[index, 'status_inferred_versification'] = vrs_num # Store the inferred versification number
 
             # Extract Licence Details (only if needed or forced)
@@ -995,6 +995,9 @@ def main() -> None:
     metadata_folder: Path = base / "metadata"
     logs_folder: Path = base / "logs"
 
+    # Get vrs_diffs
+    vrs_diffs = get_vrs_diffs()
+    
     # --- Setup Logging ---
     logs_folder.mkdir(parents=True, exist_ok=True) # Ensure log dir exists first
     year, month, day, hour, minute = map(int, strftime("%Y %m %d %H %M").split())
@@ -1040,7 +1043,6 @@ def main() -> None:
 
     # --- Handle --update-settings mode ---
     if args.update_settings:
-        vrs_diffs = get_vrs_diffs()
         updated_status_df = update_all_settings(
             status_df.copy(), # Pass a copy to avoid modifying original before save
             projects_folder,
@@ -1115,10 +1117,9 @@ def main() -> None:
     #     sys.exit(0)
 
     # Unzip, Rename, Settings, Licence
-    vrs_diffs_data = get_vrs_diffs()
     actions_df = unzip_and_process_files(
         actions_df, downloads_folder, projects_folder,
-        private_projects_folder, vrs_diffs_data, logfile
+        private_projects_folder, vrs_diffs, logfile
     )
 
     # Perform licence checks for existing projects if needed

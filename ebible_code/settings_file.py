@@ -12,14 +12,16 @@ import yaml
 from machine.corpora import ParatextTextCorpus, extract_scripture_corpus
 from machine.scripture.verse_ref import VerseRef
 
-vrs_to_num: dict[str, int] = {
-    "Original": 1,
-    "Septuagint": 2,
-    "Vulgate": 3,
-    "English": 4,
-    "Russian Protestant": 5,
-    "Russian Orthodox": 6,
+vrs_to_num_string: dict[str, str] = {
+    "Original": "1",
+    "Septuagint": "2",
+    "Vulgate": "3",
+    "English": "4",
+    "Russian Protestant": "5",
+    "Russian Orthodox": "6",
 }
+
+VALID_NUM_STRINGS = ["1", "2", "3", "4", "5", "6"]
 
 BOOK_NUM = r"[0-9].\-"
 
@@ -200,7 +202,7 @@ def get_versification(
     default_versification = "English"
     print(f"\n--- get_versification for: {project_folder.name} ---") # Add project identifier
 
-    versifications = list(vrs_to_num.keys())
+    versifications = list(vrs_to_num_string.keys())
     ruled_out = []
     processed_first_vref = False
     # Use VerseRef objects if possible, otherwise adapt check_vref
@@ -268,7 +270,7 @@ def get_versification(
             f"Warning: Could not determine versification for {project_folder}, defaulting."
         )
         # Default to English as per the old logic's fallback? Or the first in the list?
-        return "English"  # Or list(vrs_to_num.keys())[0]
+        return "4"
 
     return versifications[0]
 
@@ -277,7 +279,7 @@ def write_settings_file(
     project_folder: Path,
     language_code: str,
     vrs_diffs: dict[str, dict[int, dict[int, list[str]]]],
-) -> tuple[Path, int, dict, dict]: # Return path, vrs_num, old_settings, new_settings
+) -> tuple[Path, str, dict, dict]: # Return path, vrs_num_string, old_settings, new_settings
     """
     Write a Settings.xml file to the project folder and overwrite any existing one.
     The file is very minimal containing only:
@@ -299,7 +301,7 @@ def write_settings_file(
             - Dictionary of old settings values (or defaults if file missing/malformed)
             - Dictionary of new settings values
     """
-    default_vrs_num = 4 # Default to English
+    default_vrs_num_string = "4" # Default to English
     settings_file = project_folder / "Settings.xml"
     old_settings = {
         "old_Versification": None,
@@ -330,20 +332,14 @@ def write_settings_file(
                  print(f"Warning: Error reading existing {settings_file}: {e}. Old values will be None.")
 
         # --- Determine new settings ---
-        try:
-            versification_name = get_versification(project_folder, vrs_diffs)
-            # Safely get the number, default to default_vrs_num if name not found or invalid
-            vrs_num = vrs_to_num.get(versification_name, default_vrs_num)
-            if not isinstance(vrs_num, int): # Ensure it's an integer
-                 print(f"Warning: Versification lookup for '{versification_name}' returned non-integer {vrs_num}. Defaulting to {default_vrs_num}.")
-                 vrs_num = default_vrs_num
-        except Exception as e:
-            print(f"Error during get_versification for {project_folder}: {e}. Defaulting versification to {default_vrs_num}.")
-            vrs_num = default_vrs_num
+        versification_name = get_versification(project_folder, vrs_diffs)
+        vrs_num_string = vrs_to_num_string.get(versification_name, default_vrs_num_string)
+        if vrs_num_string not in VALID_NUM_STRINGS:
+            raise ValueError(f"Invalid versification: {vrs_num_string}")
 
         # Define new values for reporting
         new_settings = {
-            "new_Versification": vrs_num,
+            "new_Versification": vrs_num_string,
             "new_LanguageIsoCode": f"{language_code}:::",
             "new_BookNameForm": "41MAT", # Consistent naming scheme
             "new_PostPart": f"{language_code}.SFM",
@@ -364,7 +360,7 @@ def write_settings_file(
 
         with open(settings_file, "w") as settings:
             settings.write(setting_file_text)
-        return settings_file, vrs_num, old_settings, new_settings
+        return settings_file, vrs_num_string, old_settings, new_settings
     else:
         # Project folder doesn't exist
-        return None, default_vrs_num, old_settings, new_settings # Return None path, default vrs, empty dicts
+        return None, default_vrs_num_string, old_settings, new_settings # Return None path, default vrs, empty dicts

@@ -7,15 +7,6 @@ import pandas as pd
 import pyarrow
 from tqdm import tqdm
 
-
-load_dotenv()
-
-# --- Configuration ---
-METADATA_FILENAME = "ebible_status.csv"
-VREF_FILENAME = "vref.txt"
-OUTPUT_SUBDIR = "huggingface"
-OUTPUT_FILENAME = "bible_corpus.parquet"
-
 # --- Script Logic ---
 
 def parse_vref(vref_line):
@@ -27,11 +18,14 @@ def parse_vref(vref_line):
         # Handle potential malformed lines if necessary, or return None/raise error
         print(f"Warning: Could not parse vref line: '{vref_line}'", file=sys.stderr)
         return None, None, None
+    
 
 def main():
     """Main function to prepare the Hugging Face dataset."""
-
+    
     # 1. Get EBIBLE_DATA_DIR environment variable
+    load_dotenv()
+
     ebible_data_dir_str = os.getenv("EBIBLE_DATA_DIR")
     if not ebible_data_dir_str:
         print("Error: Environment variable EBIBLE_DATA_DIR is not set.", file=sys.stderr)
@@ -43,16 +37,24 @@ def main():
         print(f"Error: EBIBLE_DATA_DIR path does not exist or is not a directory: {ebible_data_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # 2. Construct necessary paths
-    vref_path = ebible_data_dir / "metadata" / VREF_FILENAME
-    metadata_path = ebible_data_dir / "metadata" / METADATA_FILENAME
-    output_dir = ebible_data_dir / OUTPUT_SUBDIR
-    output_parquet_path = output_dir / OUTPUT_FILENAME
 
-    print(f"Using EBIBLE_DATA_DIR: {ebible_data_dir}")
-    print(f"Reading vref from:     {vref_path}")
-    print(f"Reading metadata from: {metadata_path}")
-    print(f"Output directory:    {output_dir}")
+    # 2. Construct necessary paths
+    vref_path = ebible_data_dir / "metadata" / os.getenv("VREF_FILENAME")
+    metadata_path = ebible_data_dir / "metadata" / os.getenv("METADATA_FILENAME")
+
+    hf_output_dir = ebible_data_dir / (os.getenv("HUGGINGFACE_OUTPUT_FOLDER"))
+
+    if not hf_output_dir.is_dir():
+        print(f"Error: Could not find HUGGINGFACE_OUTPUT_FOLDER: {hf_output_dir}.")
+        sys.exit(1)
+
+    hf_main_parquet_file = hf_output_dir / os.getenv("HUGGINGFACE_MAIN_PARQUET_FILENAME")
+    hf_metadata_parquet_file = hf_output_dir / os.getenv("HUGGINGFACE_METADATE_PARQUET_FILENAME")
+
+    print(f"Using EBIBLE_DATA_DIR:           {ebible_data_dir}")
+    print(f"Reading vref from:               {vref_path}")
+    print(f"Reading metadata from:           {metadata_path}")
+    print(f"Output folder for parquet files: {hf_output_dir}")
 
     # 3. Load and parse vref.txt
     print("\n--- Loading vref.txt ---")
@@ -206,14 +208,11 @@ def main():
         print("Please check warnings and input files.", file=sys.stderr)
     else:
         try:
-            # Ensure output directory exists
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            print(f"Writing {len(df)} rows and {len(df.columns)} columns to {output_parquet_path}...")
-            df.to_parquet(output_parquet_path, index=False, engine='pyarrow', compression='snappy')
+            print(f"Writing {len(df)} rows and {len(df.columns)} columns to {hf_main_parquet_file}...")
+            df.to_parquet(hf_main_parquet_file, index=False, engine='pyarrow', compression='snappy')
             print("Successfully wrote Parquet file.")
         except Exception as e:
-            print(f"Error writing Parquet file to {output_parquet_path}: {e}", file=sys.stderr)
+            print(f"Error writing Parquet file to {hf_main_parquet_file}: {e}", file=sys.stderr)
             sys.exit(1)
 
     # 8. Prepare and Save Metadata File for Included Translations
@@ -240,13 +239,12 @@ def main():
         relevant_metadata_columns = [col for col in relevant_metadata_columns if col in final_metadata_df.columns]
         final_metadata_df = final_metadata_df[relevant_metadata_columns]
 
-        metadata_output_path = output_dir / "metadata.csv"
         try:
-            print(f"Writing metadata for {len(final_metadata_df)} included translations to {metadata_output_path}...")
-            final_metadata_df.to_csv(metadata_output_path, index=False, encoding='utf-8')
+            print(f"Writing metadata for {len(final_metadata_df)} included translations to {hf_main_parquet_file}...")
+            final_metadata_df.to_csv(hf_main_parquet_file, index=False, encoding='utf-8')
             print("Successfully wrote metadata CSV file.")
         except Exception as e:
-            print(f"Error writing metadata CSV file to {metadata_output_path}: {e}", file=sys.stderr)
+            print(f"Error writing metadata CSV file to {hf_main_parquet_file}: {e}", file=sys.stderr)
             # Don't exit, the main parquet might still be useful
     else:
         print("Skipping metadata file generation as no translations were included.")

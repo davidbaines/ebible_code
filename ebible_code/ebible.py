@@ -762,65 +762,140 @@ def check_and_update_licences(df: pd.DataFrame) -> pd.DataFrame:
     logging.info(f"Finished separate licence check. Updated {checked_count}/{count} projects.")
     return df
 
-def rename_extracted_files(df: pd.DataFrame, corpus_folder: Path, private_corpus_folder: Path) -> pd.DataFrame:
-    """Renames extracted files from SILNLP output format to {translation_id}.txt."""
-    # Filter for rows where extract exists but rename hasn't happened
-    rename_candidates = df[df['status_extract_date'].notna() & df['status_extract_renamed_date'].isna()]
-    count = len(rename_candidates)
+def rename_extracted_files(
+    status_df: pd.DataFrame,  # The full, unfiltered status DataFrame
+    corpus_folder: Path,
+    private_corpus_folder: Path
+) -> pd.DataFrame:
+    """
+    Scans corpus folders for .txt files, renames them from SILNLP output format
+    (lang_code-translation_id.txt) to translation_id.txt.
+    Updates status_df with rename status and correct paths.
+    Reports on files processed and any unexpected files found.
+    """
+    logging.info("Starting scan of corpus folders to rename extracted files...")
 
-    if count == 0:
-        # logging.info(f"No extracted files require renaming.")
-        return df
+    renamed_files_log = []
+    target_exists_skipped_log = []
+    already_correct_name_log = []
+    unknown_txt_files_log = []
+    non_txt_files_log = []
+    failed_to_rename_log = []
 
-    logging.info(f"Attempting to rename {count} extracted files...")
-    renamed_count = 0
-    target_file_exists_count = 0
-    for index, row in tqdm(rename_candidates.iterrows(), total=count, desc="Renaming Extracts"):
-        lang_code = row['languageCode']
-        translation_id = row['translationId']
-        is_redist = row['Redistributable']
-        corpus_base = corpus_folder if is_redist else private_corpus_folder
+    files_processed_count = 0
 
-        # --- Determine potential SILNLP output filenames ---
-        # Pattern 1: lang-lang-id.txt (e.g., abt-abt-maprik.txt)
-        silnlp_output_name1 = f"{lang_code}-{translation_id}.txt"
-        # Pattern 2: lang-id.txt (e.g., aoj-aoj.txt - SILNLP might handle simple cases differently)
-        # This might be the same as translation_id.txt if lang==id prefix
-        silnlp_output_name2 = f"{lang_code}-{translation_id}.txt" # Corrected: This was same as pattern 1, should be simpler
-        # Let's assume the most likely pattern is lang-translation_id.txt based on input project name
-        silnlp_output_path = corpus_base / silnlp_output_name1
+    for folder_to_scan in [corpus_folder, private_corpus_folder]:
+        if not folder_to_scan.is_dir():
+            logging.warning(f"Corpus folder not found, skipping: {folder_to_scan}")
+            continue
+        
+        logging.info(f"Scanning folder: {folder_to_scan}")
+        # Sort for consistent processing order, helpful for debugging/review
+        discovered_files = sorted(list(folder_to_scan.glob('*'))) 
+        
+        for filepath in discovered_files:
+            files_processed_count += 1
+            filename = filepath.name
+            filestem = filepath.stem
 
-        target_name = f"{translation_id}.txt"
-        target_path = corpus_base / target_name
+            if not filepath.is_file(): # Skip directories
+                continue
 
-        if silnlp_output_path.exists() and silnlp_output_path != target_path:
-            if target_path.exists():
-                #logging.warning(f"Target rename path {target_path} already exists. Skipping rename for {translation_id}.")
-                target_file_exists_count += 1
-            else:
-                try:
-                    silnlp_output_path.rename(target_path)
-                    df.loc[index, 'status_extract_renamed_date'] = TODAY_STR
-                    df.loc[index, 'status_extract_path'] = str(target_path.resolve()) # Update path to correct one
-                    renamed_count += 1
-                    logging.info(f"Renamed {silnlp_output_path.name} to {target_path.name}")
-                except OSError as e:
-                    logging.error(f"Error renaming {silnlp_output_path} to {target_path}: {e}")
-                    df.loc[index, 'status_last_error'] = f"Extract rename failed: {e}"
-        elif target_path.exists():
-             # If the target already exists, assume it was renamed previously or SILNLP produced correct name
-             if pd.isna(row['status_extract_renamed_date']):
-                  df.loc[index, 'status_extract_renamed_date'] = TODAY_STR # Mark as done
-                  logging.info(f"Target file {target_path.name} already exists, marking rename as complete.")
-        # else: # File not found with expected SILNLP pattern
-            # logging.warning(f"Could not find expected SILNLP output file {silnlp_output_path.name} for {translation_id}")
+            if filepath.suffix.lower() != '.txt':
+                non_txt_files_log.append(str(filepath.resolve()))
+                continue
 
-    if renamed_count :
-        logging.info(f"Finished renaming. Renamed {renamed_count} files.")
+            # Try to parse as <lang_code>-<translation_id_part>.txt
+            parts = filestem.split('-', 1)
+            processed_this_file = False
 
-    if target_file_exists_count:
-        logging.info(f"Didn't rename {target_file_exists_count} files that already exist.")
-    return df
+            if len(parts) == 2: # Potential lang-id.txt
+                potential_lang_code, potential_id_from_file = parts[0], parts[1]
+                
+                matching_rows = status_df[
+                    (status_df['languageCode'] == potential_lang_code) &
+                    (status_df['translationId'] == potential_id_from_file)
+                ]
+
+                if not matching_rows.empty:
+                    original_df_idx = matching_rows.index[0]
+                    target_name = f"{potential_id_from_file}.txt"
+                    target_path = filepath.with_name(target_name)
+
+                    if filepath.name != target_name: # Only proceed if current name is different from target
+                        if target_path.exists():
+                            target_exists_skipped_log.append(
+                                f"{filename} (target {target_name} already exists in {folder_to_scan})"
+                            )
+                            if pd.isna(status_df.loc[original_df_idx, 'status_extract_renamed_date']):
+                                status_df.loc[original_df_idx, 'status_extract_renamed_date'] = TODAY_STR
+                            status_df.loc[original_df_idx, 'status_extract_path'] = str(target_path.resolve())
+                            status_df.loc[original_df_idx, 'status_last_error'] = f"Rename skipped; target {target_name} exists."
+                            processed_this_file = True
+                        else: # Target does not exist, and current file is different
+                            try:
+                                filepath.rename(target_path)
+                                renamed_files_log.append(f"{filename} -> {target_name} in {folder_to_scan}")
+                                status_df.loc[original_df_idx, 'status_extract_renamed_date'] = TODAY_STR
+                                status_df.loc[original_df_idx, 'status_extract_path'] = str(target_path.resolve())
+                                status_df.loc[original_df_idx, 'status_last_error'] = np.nan
+                            except OSError as e:
+                                logging.error(f"Error renaming {filepath} to {target_path}: {e}")
+                                failed_to_rename_log.append(f"{filename} (in {folder_to_scan}, error: {e})")
+                                status_df.loc[original_df_idx, 'status_last_error'] = f"Extract rename failed: {e}"
+                            processed_this_file = True
+            
+            if processed_this_file:
+                continue
+
+            # If not processed as lang-id.txt, check if it's a correctly named id.txt or unknown
+            matching_rows_direct = status_df[status_df['translationId'] == filestem]
+
+            if not matching_rows_direct.empty:
+                original_df_idx_direct = matching_rows_direct.index[0]
+                already_correct_name_log.append(f"{filename} (in {folder_to_scan})")
+                
+                if pd.isna(status_df.loc[original_df_idx_direct, 'status_extract_renamed_date']):
+                    status_df.loc[original_df_idx_direct, 'status_extract_renamed_date'] = TODAY_STR
+                status_df.loc[original_df_idx_direct, 'status_extract_path'] = str(filepath.resolve())
+                if "Extract rename failed" in str(status_df.loc[original_df_idx_direct, 'status_last_error']) or \
+                   "Rename skipped" in str(status_df.loc[original_df_idx_direct, 'status_last_error']):
+                    status_df.loc[original_df_idx_direct, 'status_last_error'] = np.nan
+                processed_this_file = True
+            
+            if not processed_this_file:
+                unknown_txt_files_log.append(f"{filename} (in {folder_to_scan})")
+
+    logging.info(f"--- Corpus File Renaming Summary (Processed {files_processed_count} items) ---")
+    if renamed_files_log:
+        logging.info(f"Successfully renamed {len(renamed_files_log)} files:")
+        for item in renamed_files_log: logging.info(f"  - {item}")
+    if target_exists_skipped_log:
+        logging.info(f"Skipped renaming for {len(target_exists_skipped_log)} files (target already existed):")
+        for item in target_exists_skipped_log: logging.info(f"  - {item}")
+    if already_correct_name_log:
+        logging.info(f"Found {len(already_correct_name_log)} files already correctly named (status updated if needed):")
+        for item in already_correct_name_log: logging.info(f"  - {item}")
+    if failed_to_rename_log:
+        logging.error(f"Failed to rename {len(failed_to_rename_log)} files due to errors:")
+        for item in failed_to_rename_log: logging.error(f"  - {item}")
+    
+    if not unknown_txt_files_log and not non_txt_files_log:
+        logging.info("\nNo unexpected files found in corpus folders.")
+    else:
+        logging.info("\n--- Unexpected Files Report ---")
+        if unknown_txt_files_log:
+            logging.warning(f"Found {len(unknown_txt_files_log)} unknown .txt files (not matching known translation IDs or patterns):")
+            for item in unknown_txt_files_log: logging.warning(f"  - {item}")
+        if non_txt_files_log:
+            logging.warning(f"Found {len(non_txt_files_log)} non-.txt files in corpus folders:")
+            for item in non_txt_files_log: logging.warning(f"  - {item}")
+    
+    if not (renamed_files_log or target_exists_skipped_log or already_correct_name_log or failed_to_rename_log or unknown_txt_files_log or non_txt_files_log):
+        logging.info("No files required renaming and no unexpected files found in corpus folders.")
+
+    logging.info("Finished renaming extracted files.")
+    return status_df
 
 
 # --- Function for --update-settings mode ---
@@ -977,8 +1052,8 @@ def main() -> None:
     # --- Setup Logging ---
     logs_folder.mkdir(parents=True, exist_ok=True) # Ensure log dir exists first
     year, month, day, hour, minute = map(int, strftime("%Y %m %d %H %M").split())
-    log_suffix_dt: str = f"_{year}_{month:02d}_{day:02d}-{hour:02d}_{minute:02d}"
-    log_filename: str = f"ebible_status{log_suffix_dt}.log"
+    log_suffix: str = f"_{year}_{month:02d}_{day:02d}-{hour:02d}_{minute:02d}"
+    log_filename: str = f"ebible_status{log_suffix}.log"
     logfile: Path = logs_folder / log_filename
     logging.info(f"Logging to: {logfile}")
 
@@ -1036,7 +1111,7 @@ def main() -> None:
         except Exception as e:
             logging.error(f"Error saving status file {status_path} after settings update: {e}")
         # Print SILNLP commands and exit
-        print_silnlp_commands(logs_folder, log_suffix_dt, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
+        print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
         sys.exit(0)
 
     # --- Scan existing folders to update status if necessary---
@@ -1101,8 +1176,8 @@ def main() -> None:
     actions_df = check_and_update_licences(actions_df)
 
     # --- Perform post-extraction renaming ---
-    # Run this before saving status, so rename date gets saved
-    actions_df = rename_extracted_files(actions_df, corpus_folder, private_corpus_folder)
+    # Pass the full status_df to scan all corpus files and update status directly
+    status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
     
     # --- Update Main Status DataFrame and Save ---
     # Use update() which aligns on index (translationId if set, otherwise row number)

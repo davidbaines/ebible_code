@@ -2018,7 +2018,6 @@ Once you've sorted out the imports, running compare_versifications.py should now
 
 Rate this answer: 
 External Sources (1)
-Context Sources (2)
 
 David Baines
 Oh - sorry. I want to start without trying to copy parts of the machine.py repo into this one. That would defeat the main idea of reusing code, by duplicating it and having to maintain it in two places. I want to test all the parts necessary for importing from machine.py. That will likely mean checking the PYTHONPATH environment variable is correct and maybe other things. That's very helpful to know. What's a minimum change I can make to the code to test that importing VersificationType from the installed machine.py repo is working?
@@ -2095,7 +2094,6 @@ There might be an issue within the machine.scripture.verse_ref module itself or 
 This minimal change directly tests the crucial step of importing from your machine.py repository as if it were an installed library. Once this works, you can then confidently proceed to integrate more of its classes and functionalities.
 
 Rate this answer: 
-Context Sources (1)
 
 David Baines
 The sil-machine library is (or should be) installed. It is listed in the pyproject.toml file. poetry install works, though with the warning
@@ -2213,7 +2211,484 @@ In such a case: * Double-check the sys.path output from test_sil_import.py. Is t
 The goal is to get from machine.scripture.verse_ref import VersificationType working reliably by leveraging the Poetry-managed installation of sil-machine. Once that single import works, the rest of the integration should be much smoother.
 
 Rate this answer: 
-Context Sources (2)
-Now the import is working! That's great. by looking at the @sample_verse_ref.py file can you see which parts of that might be useful for refactoring this code to make it more robust by making use of the well tested code?
-Are there any ways to use that to simplfy this code?
-Can we also work on adding the verse counts from the versification 
+Context Sources (1)
+
+David Baines
+Now the import is working! That's great. by looking at the sample_verse_ref.py file can you see which parts of that might be useful for refactoring this code to make it more robust by making use of the well tested code? Are there any ways to use that to simplfy this code? Can we also work on adding the verse counts from the common versification s? What questions do you have before working on the code?
+
+
+Gemini
+That's fantastic news that the import is working! It's a significant step forward.
+
+Yes, looking at the sample_verse_ref.py (which is a copy of machine/scripture/verse_ref.py), there are definitely several parts we can leverage to make your compare_versifications.py script more robust and potentially simpler. The Versification class itself is designed to parse and represent .vrs files, so we can replace your manual parsing logic with it.
+
+Here's how we can refactor and simplify, and then address adding verse counts from the common versifications:
+
+Leveraging Versification Class from sample_verse_ref.py (i.e., machine.scripture.verse_ref):
+
+Parsing .vrs Files:
+The Versification.load(file_path) class method is perfect for this. It handles opening the file, detecting encoding, and then uses the internal _parse_versification (via Versification.parse) to populate a Versification object.
+This will replace your parse_vrs_file function entirely.
+Accessing Verse Counts:
+Once a .vrs file is loaded into a Versification object, you can use:
+versification_obj.get_last_book(): To find the number of books defined.
+versification_obj.get_last_chapter(book_num): To get the last chapter for a given book number.
+versification_obj.get_last_verse(book_num, chapter_num): To get the maximum verse for a book and chapter.
+This means we won't need to store the parsed data in our own defaultdict(lambda: defaultdict(int)) structure; the Versification object will hold it. We'll need to convert book IDs (like "GEN") to book numbers (like 1) to use these methods. The canon.py module (which verse_ref.py imports from) has book_id_to_number.
+Ordering Common Versifications:
+We can still use VersificationType as before to determine the preferred order of columns for common versifications.
+The Versification class has _BUILTIN_VERSIFICATION_FILENAMES and _BUILTIN_VERSIFICATION_NAMES_TO_TYPES which could be useful for mapping VersificationType enum values to the filenames of your common .vrs files in the assets directory, making the vtype_to_stem dictionary more robust or even unnecessary if your filenames match those in _BUILTIN_VERSIFICATION_FILENAMES.
+Simplification Benefits:
+
+Reduced Code: Your parse_vrs_file function and the associated regex patterns (VRS_LINE_PATTERN, CHAPTER_VERSE_PATTERN) can be removed.
+Robustness: You'll be relying on the well-tested parsing logic within the sil-machine library, which likely handles more edge cases and variations in .vrs file formats than custom parsing logic.
+Maintainability: If the .vrs format evolves or new features are added to its parsing in sil-machine, you'll benefit from those updates by just updating the library, without needing to change your script's parsing code.
+Adding Verse Counts from Common Versifications (as part of the refactor):
+
+This is already the core functionality of compare_versifications.py. The refactoring will change how we get that data (using the Versification object's methods instead of our custom parsed dictionary), but the goal of populating the CSV with these counts remains the same.
+
+Questions Before Working on the Code:
+
+Filename Convention for Common .vrs files:
+
+The Versification class in sample_verse_ref.py has _BUILTIN_VERSIFICATION_FILENAMES (e.g., VersificationType.ENGLISH: "eng.vrs.txt").
+Do the .vrs files in your c:\ebible_code\assets directory follow this naming convention (e.g., eng.vrs.txt, vul.vrs.txt)? Or are they simpler like eng.vrs, vul.vrs?
+Knowing this will help in mapping VersificationType to the actual files to be loaded. If they are, for example, eng.vrs, we can adapt.
+Dependencies of Versification.load():
+
+The Versification.load() method and its underlying parsing logic in sample_verse_ref.py depend on book_id_to_number from canon.py and potentially other utilities from the ..utils package.
+Since your import from machine.scripture.verse_ref import VersificationType is now working, it implies that Python can find the machine package and its submodules (including scripture.canon and utils). So, when we import Versification and call Versification.load(), its internal imports should also work. We'll proceed with this assumption.
+Handling of Book IDs vs. Book Numbers:
+
+Your current compare_versifications.py script works with 3-letter book IDs (e.g., "GEN").
+The Versification object's methods (get_last_chapter, get_last_verse) primarily use integer book_num.
+We'll need to consistently use book_id_to_number (from machine.scripture.canon) when querying the Versification objects. The canon.py file should be part of the sil-machine installation.
+Let's start refactoring compare_versifications.py to use the Versification class.
+
+diff
+-50
++103
+The code change produced by Gemini could not be fully parsed. Can't automatically accept changes.
+
+# --- Import from installed sil-machine library ---
+try:
+    from machine.scripture.verse_ref import VersificationType
+    from machine.scripture.verse_ref import Versification, VersificationType
+    from machine.scripture.canon import book_id_to_number, book_number_to_id, LAST_BOOK
+    # Note: book_number_to_id and LAST_BOOK might be useful later for creating the master list
+    logger.info(f"Successfully imported VersificationType from machine.scripture: {VersificationType.ENGLISH}")
+    CAN_IMPORT_VERSE_REF = True
+except ImportError as e:
+Unchanged lines
+# Regex for parsing chapter:verse entries in VRS files
+# Example line: GEN 1:31 2:25 3:24
+VRS_LINE_PATTERN = re.compile(r"^([A-Z0-9]{3})\s+(.*)")
+CHAPTER_VERSE_PATTERN = re.compile(r"(\d+):(\d+)")
+
+
+def parse_vrs_file(vrs_path: Path) -> Dict[str, Dict[int, int]]:
+    """
+    Parses a .vrs file into a dictionary: {book_id: {chapter_num: max_verse}}.
+    """
+    parsed_data = defaultdict(lambda: defaultdict(int))
+    if not vrs_path.is_file():
+        logger.warning(f"VRS file not found: {vrs_path}")
+        return parsed_data
+
+    try:
+        with open(vrs_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                match = VRS_LINE_PATTERN.match(line)
+                if match:
+                    book_id = match.group(1).upper()
+                    chapters_part = match.group(2)
+                    
+                    for cv_match in CHAPTER_VERSE_PATTERN.finditer(chapters_part):
+                        try:
+                            chapter = int(cv_match.group(1))
+                            verses = int(cv_match.group(2))
+                            parsed_data[book_id][chapter] = verses
+                        except ValueError:
+                            logger.warning(f"Malformed chapter:verse '{cv_match.group(0)}' in {vrs_path.name} for book {book_id}")
+                else:
+                    # Could be a mapping line or other format we are ignoring for now
+                    pass # logger.debug(f"Skipping non-data line in {vrs_path.name}: {line[:50]}")
+    except Exception as e:
+        logger.error(f"Error parsing VRS file {vrs_path}: {e}")
+    return parsed_data
+
+
+def find_vrs_files(directory: Path, pattern: str = "*.vrs") -> List[Path]:
+Unchanged lines
+    args = parser.parse_args()
+
+    # --- 1. Find and parse all VRS files ---
+    all_parsed_vrs: Dict[str, Dict[str, Dict[int, int]]] = {} # {source_name: {book: {chap: verse}}}
+    # Store loaded Versification objects: {source_name: Versification_object}
+    all_loaded_versifications: Dict[str, Versification] = {}
+
+    # Parse common VRS files
+    logger.info(f"Looking for common VRS files in: {args.common_vrs_dir}")
+    common_vrs_files = find_vrs_files(args.common_vrs_dir)
+    if not common_vrs_files:
+        logger.warning(f"No common .vrs files found in {args.common_vrs_dir}. Proceeding without them.")
+    
+    for vrs_file in common_vrs_files:
+        source_name = vrs_file.stem # e.g., "vul" from "vul.vrs"
+        logger.info(f"Parsing common VRS: {vrs_file.name} (as '{source_name}')")
+        all_parsed_vrs[source_name] = parse_vrs_file(vrs_file)
+        try:
+            # Use fallback_name as the Versification object's name if not in file
+            loaded_vrs = Versification.load(vrs_file, fallback_name=source_name)
+            all_loaded_versifications[source_name] = loaded_vrs
+        except Exception as e:
+            logger.error(f"Failed to load common VRS file {vrs_file.name}: {e}")
+
+    # Parse project-specific VRS files
+    logger.info(f"Looking for project VRS files in: {args.projects_dirs}")
+    project_vrs_map = find_project_vrs_files(args.projects_dirs)
+    if not project_vrs_map:
+        logger.warning(f"No project-specific .vrs files found in subdirectories of {args.projects_dirs}. Proceeding without them.")
+    
+    for project_name, vrs_file in project_vrs_map.items():
+        logger.info(f"Parsing project VRS: {vrs_file.name} (for project '{project_name}')")
+        all_parsed_vrs[project_name] = parse_vrs_file(vrs_file)
+
+    if not all_parsed_vrs:
+        try:
+            # Use project_name as the Versification object's name
+            loaded_vrs = Versification.load(vrs_file, fallback_name=project_name)
+            all_loaded_versifications[project_name] = loaded_vrs
+        except Exception as e:
+            logger.error(f"Failed to load project VRS file {vrs_file.name} for project {project_name}: {e}")
+
+
+    if not all_loaded_versifications:
+        logger.error("No VRS files (common or project) were found or parsed. Cannot generate comparison. Exiting.")
+        sys.exit(1)
+
+Unchanged lines
+    # --- 2. Create a master list of all unique (Book, Chapter) pairs ---
+    master_book_chapter_set: Set[Tuple[str, int]] = set()
+    if CAN_IMPORT_VERSE_REF:
+        for source_data in all_parsed_vrs.values():
+            for book_id, chapters in source_data.items():
+                for chapter_num in chapters.keys():
+                    master_book_chapter_set.add((book_id, chapter_num))
+        for vrs_obj in all_loaded_versifications.values():
+            for book_num_int in range(1, vrs_obj.get_last_book() + 1):
+                book_id_str = book_number_to_id(book_num_int)
+                if not book_id_str: # Skip if book_number_to_id returns empty (e.g., invalid num)
+                    continue
+                for chapter_num_int in range(1, vrs_obj.get_last_chapter(book_num_int) + 1):
+                    # Check if the chapter actually has verses defined, not just implied by get_last_chapter
+                    if vrs_obj.get_last_verse(book_num_int, chapter_num_int) > 0:
+                        master_book_chapter_set.add((book_id_str, chapter_num_int))
+    else:
+        # Fallback if imports failed - this part would need the old parsing logic
+        # For now, let's assume CAN_IMPORT_VERSE_REF is true for this refactor.
+Unchanged lines
+
+    # --- 3. Prepare data for DataFrame ---
+    output_data_list = []
+    source_names = sorted(all_parsed_vrs.keys()) # Consistent column order
+    
+    # Determine column order for versifications (logic from previous step, slightly adapted)
+    common_vrs_ordered_names = []
+    project_vrs_names = []
+
+    if CAN_IMPORT_VERSE_REF:
+        vtype_to_stem = {
+            VersificationType.ORIGINAL: "org", VersificationType.SEPTUAGINT: "lxx",
+            VersificationType.VULGATE: "vul", VersificationType.ENGLISH: "eng", 
+            # Attempt to match names from Versification._BUILTIN_VERSIFICATION_FILENAMES
+            # This assumes your assets files might be named like "eng.vrs" or "eng.vrs.txt"
+            # The .stem of "eng.vrs.txt" is "eng.vrs", .stem of "eng.vrs" is "eng"
+            # We'll match against the stem of the filename in _BUILTIN_VERSIFICATION_FILENAMES
+            v_type: Path(fname).stem.replace(".vrs","") # Get "eng" from "eng.vrs.txt" or "eng.vrs"
+            for v_type, fname in Versification._BUILTIN_VERSIFICATION_FILENAMES.items()
+        }
+        # Add mappings from _BUILTIN_VERSIFICATION_NAMES_TO_TYPES if they provide different stems/names
+        for name, vtype in Versification._BUILTIN_VERSIFICATION_NAMES_TO_TYPES.items():
+            if vtype not in vtype_to_stem: # Only add if not already covered by filename
+                 vtype_to_stem[vtype] = name # Or a simplified stem if preferred
+
+        available_source_names = {name.lower() for name in all_loaded_versifications.keys()}
+        for vtype_enum_member in VersificationType:
+            stem_candidate = vtype_to_stem.get(vtype_enum_member)
+            if stem_candidate and stem_candidate.lower() in available_source_names:
+                for actual_source_name in all_loaded_versifications.keys():
+                    if actual_source_name.lower() == stem_candidate.lower():
+                        if actual_source_name not in common_vrs_ordered_names:
+                            common_vrs_ordered_names.append(actual_source_name)
+                        break
+        
+        other_common_sources = sorted([
+            name for name in all_loaded_versifications.keys()
+            if (args.common_vrs_dir / f"{name}.vrs").exists() and name not in common_vrs_ordered_names # Check original simple name
+            or (args.common_vrs_dir / f"{name}.vrs.txt").exists() and name not in common_vrs_ordered_names # Check with .txt
+        ])
+        common_vrs_ordered_names.extend(s for s in other_common_sources if s not in common_vrs_ordered_names)
+
+        project_vrs_names = sorted([
+            name for name in all_loaded_versifications.keys() if name not in common_vrs_ordered_names
+        ])
+        source_names_ordered = common_vrs_ordered_names + project_vrs_names
+    else:
+        source_names_ordered = sorted(all_loaded_versifications.keys())
+
+    logger.info(f"Column order for VRS sources: {source_names_ordered}")
+
+    for book_id_str, chapter_num_int in sorted_master_list:
+        row = {"Book": book_id_str, "Chapter": chapter_num_int}
+        book_num_int = book_id_to_number(book_id_str) if CAN_IMPORT_VERSE_REF else 0
+
+        for source_name in source_names_ordered:
+            vrs_obj = all_loaded_versifications.get(source_name)
+            verse_count = None
+            if vrs_obj and CAN_IMPORT_VERSE_REF and book_num_int > 0:
+                # Check if book and chapter are within the defined range for this vrs_obj
+                if book_num_int <= vrs_obj.get_last_book() and \
+                   chapter_num_int <= vrs_obj.get_last_chapter(book_num_int):
+                    verse_count = vrs_obj.get_last_verse(book_num_int, chapter_num_int)
+                    if verse_count == 0 and not (book_num_int > vrs_obj.get_last_book() or chapter_num_int > vrs_obj.get_last_chapter(book_num_int)):
+                        # If get_last_verse returns 0 for a chapter that *should* exist,
+                        # it might mean the chapter is defined but has no verses listed (or 0 verses).
+                        # For CSV, we might prefer to show 0 rather than NaN in this specific case.
+                        pass # verse_count is already 0
+                    elif verse_count == 0: # Book/chapter out of range for this VRS
+                        verse_count = None
+
+            row[f"{source_name}_verses"] = verse_count
+        output_data_list.append(row)
+
+    # --- 4. Create DataFrame and save to CSV ---
+    df = pd.DataFrame(output_data_list)
+    
+    # Reorder columns to have Book, Chapter first, then sorted source_names
+    fixed_cols = ["Book", "Chapter"]
+    data_cols = [f"{source_name}_verses" for source_name in source_names_ordered]
+    df = df[fixed_cols + data_cols]
+
+    try:
+        args.output_csv.parent.mkdir(parents=True, exist_ok=True) # Ensure output directory exists
+
+Key Changes and Explanations:
+
+Imports:
+from machine.scripture.verse_ref import Versification, VersificationType
+from machine.scripture.canon import book_id_to_number, book_number_to_id, LAST_BOOK (we'll use these for book ID/number conversion).
+Removed parse_vrs_file and Regex: The custom parsing logic is no longer needed.
+Storing Loaded Versifications:
+all_loaded_versifications: Dict[str, Versification] = {} now stores the actual Versification objects loaded by Versification.load(), keyed by their source name (e.g., "vul" or project name).
+Loading VRS Files:
+Inside the loops for common and project VRS files, Versification.load(vrs_file, fallback_name=source_name) is used. The fallback_name ensures the Versification object gets a meaningful name if one isn't defined inside the # Versification "Name" line of the .vrs file.
+Creating Master Book-Chapter List:
+This part is significantly changed to iterate through the loaded Versification objects.
+For each vrs_obj, it iterates from book_num_int = 1 up to vrs_obj.get_last_book().
+For each book, it iterates from chapter_num_int = 1 up to vrs_obj.get_last_chapter(book_num_int).
+book_number_to_id(book_num_int) converts the number back to a string ID for the set.
+It adds (book_id_str, chapter_num_int) to master_book_chapter_set only if vrs_obj.get_last_verse(book_num_int, chapter_num_int) > 0 to ensure we only consider chapters that actually have verses defined in at least one versification.
+Populating DataFrame Rows:
+When iterating through sorted_master_list (which contains (book_id_str, chapter_num_int) tuples):
+book_num_int = book_id_to_number(book_id_str) converts the book ID to a number for querying the Versification object.
+vrs_obj.get_last_verse(book_num_int, chapter_num_int) is used to get the verse count.
+Added checks to ensure book_num_int and chapter_num_int are within the valid range for the specific vrs_obj before calling get_last_verse. If they are out of range, verse_count remains None (leading to NaN in CSV). If get_last_verse returns 0 for a chapter that is in range, it will be represented as 0.
+Column Ordering (vtype_to_stem):
+The logic for vtype_to_stem is updated to try and be more robust by looking at Versification._BUILTIN_VERSIFICATION_FILENAMES and Versification._BUILTIN_VERSIFICATION_NAMES_TO_TYPES from the Versification class itself. This makes it less dependent on hardcoding stems if your asset filenames align with those used internally by sil-machine.
+It now tries to match the stem_candidate (derived from VersificationType) against the all_loaded_versifications.keys() case-insensitively.
+The logic for other_common_sources also checks for both .vrs and .vrs.txt extensions.
+This refactoring should make the script more robust by relying on the sil-machine library's parsing and data representation.
+
+Before running, please ensure:
+
+The sil-machine library is correctly installed and importable via Poetry.
+Your common .vrs files in the assets directory have names that can be reasonably mapped from VersificationType (e.g., eng.vrs, vul.vrs, or eng.vrs.txt, etc.). You might need to fine-tune the vtype_to_stem logic or the filenames if the matching isn't perfect initially.
+Rate this answer: 
+Context Sources (3)
+
+David Baines
+It seems that the sil-machine is correctly installed. Inside that repo at this relarive path \machine.py\machine\scripture are the definitive vrs files. They have the .vrs.txt extension. Can we ignore (and I'll delete) the copies of them that I have in this repo and rely solely on those in that repo. By doing that we know exactly how they are named: eng.vrs.txt, lxx.vrs.txt and don't need to cope with any other naming stategy. Hopefully we don't even need to know those file names for this code, because we can use the other functions in the verse_ref code to find and parse them for us.
+
+
+Gemini
+That's an excellent idea! Relying on the definitive .vrs.txt files bundled with the sil-machine library itself is the most robust and maintainable approach. It ensures you're always using the versification definitions that the library is tested against and understands.
+
+The Versification class in machine.scripture.verse_ref is designed precisely for this with its Versification.get_builtin(VersificationType) method. This method handles locating and parsing the correct bundled .vrs.txt file for a given VersificationType.
+
+Here's how we can refactor compare_versifications.py to:
+
+Solely use Versification.get_builtin() for the common, known versification types.
+Remove the need for a --common_vrs_dir argument, as these files will be loaded directly from the sil-machine library's installation.
+The column ordering will naturally follow the VersificationType enum order for these built-in types.
+Refactoring compare_versifications.py:
+
+compare_versifications.py
+-65
++29
+# Example line: GEN 1:31 2:25 3:24
+VRS_LINE_PATTERN = re.compile(r"^([A-Z0-9]{3})\s+(.*)")
+
+def find_vrs_files(directory: Path, pattern: str = "*.vrs") -> List[Path]:
+    """Finds VRS files in a given directory."""
+    if not directory.is_dir():
+        logger.warning(f"Directory not found: {directory}")
+        return []
+    return sorted(list(directory.glob(pattern)))
+
+def find_project_vrs_files(projects_root_dirs: List[Path]) -> Dict[str, Path]:
+    """
+Unchanged lines
+    base_path = Path(ebible_data_dir_str)
+    defaults = {
+        "common_vrs_dir": base_path / "assets",
+        "projects_dirs": [base_path / "projects"], # Default to a list with one item
+        "projects_dirs": [base_path / "projects", base_path / "private_projects"], # Default to a list
+        "output_csv": base_path / "metadata" / "compare_versifications.csv"
+    }
+    return defaults
+Unchanged lines
+    parser = argparse.ArgumentParser(
+        description="Compares verse counts from multiple .vrs files and project-specific .vrs files."
+    )
+    parser.add_argument(
+        "--common_vrs_dir",
+        type=Path,
+        required=False,
+        default=default_paths["common_vrs_dir"],
+        help=f"Directory containing common .vrs files. Defaults to: {default_paths['common_vrs_dir']}",
+    )
+    parser.add_argument(
+        "--projects_dirs",
+        type=Path,
+Unchanged lines
+    # Store loaded Versification objects: {source_name: Versification_object}
+    all_loaded_versifications: Dict[str, Versification] = {}
+    
+    # Parse common VRS files
+    logger.info(f"Looking for common VRS files in: {args.common_vrs_dir}")
+    common_vrs_files = find_vrs_files(args.common_vrs_dir)
+    if not common_vrs_files:
+        logger.warning(f"No common .vrs files found in {args.common_vrs_dir}. Proceeding without them.")
+        try:
+            # Use fallback_name as the Versification object's name if not in file
+            loaded_vrs = Versification.load(vrs_file, fallback_name=source_name)
+            all_loaded_versifications[source_name] = loaded_vrs
+        except Exception as e:
+            logger.error(f"Failed to load common VRS file {vrs_file.name}: {e}")
+    # Load built-in versifications from sil-machine
+    builtin_vrs_source_names = []
+    if CAN_IMPORT_VERSE_REF:
+        logger.info("Loading built-in versifications from sil-machine library...")
+        for vtype in VersificationType:
+            if vtype == VersificationType.UNKNOWN: # Skip UNKNOWN type
+                continue
+            try:
+                # The name of the versification object will be like "English", "Vulgate"
+                # as defined by Versification._BUILTIN_VERSIFICATION_NAMES_TO_TYPES
+                vrs_obj = Versification.get_builtin(vtype)
+                # Use the official name from the vrs_obj for the dictionary key and column name
+                all_loaded_versifications[vrs_obj.name] = vrs_obj
+                builtin_vrs_source_names.append(vrs_obj.name)
+                logger.info(f"Successfully loaded built-in versification: {vrs_obj.name} (Type: {vtype.name})")
+            except Exception as e:
+                logger.error(f"Failed to load built-in versification for type {vtype.name}: {e}")
+
+    # Parse project-specific VRS files
+    logger.info(f"Looking for project VRS files in: {args.projects_dirs}")
+Unchanged lines
+    # --- 3. Prepare data for DataFrame ---
+    output_data_list = []
+    common_vrs_ordered_names = []
+    project_vrs_names = []
+
+    vtype_to_stem = {
+        VersificationType.ORIGINAL: "org", VersificationType.SEPTUAGINT: "lxx",
+        VersificationType.VULGATE: "vul", VersificationType.ENGLISH: "eng", 
+        # Attempt to match names from Versification._BUILTIN_VERSIFICATION_FILENAMES
+        # This assumes your assets files are in files named "eng.vrs" 
+        # The .stem of "eng.vrs.txt" is "eng.vrs", .stem of "eng.vrs" is "eng"
+        # We'll match against the stem of the filename in _BUILTIN_VERSIFICATION_FILENAMES
+
+        v_type: Path(fname).stem.replace(".vrs","") # Get "eng" from "eng.vrs.txt" or "eng.vrs"
+        for v_type, fname in Versification._BUILTIN_VERSIFICATION_FILENAMES.items()
+    }
+    # Add mappings from _BUILTIN_VERSIFICATION_NAMES_TO_TYPES if they provide different stems/names
+    for name, vtype in Versification._BUILTIN_VERSIFICATION_NAMES_TO_TYPES.items():
+        if vtype not in vtype_to_stem: # Only add if not already covered by filename
+                vtype_to_stem[vtype] = name # Or a simplified stem if preferred
+
+    available_source_names = {name.lower() for name in all_loaded_versifications.keys()}
+    for vtype_enum_member in VersificationType:
+        stem_candidate = vtype_to_stem.get(vtype_enum_member)
+        if stem_candidate and stem_candidate.lower() in available_source_names:
+            for actual_source_name in all_loaded_versifications.keys():
+                if actual_source_name.lower() == stem_candidate.lower():
+                    if actual_source_name not in common_vrs_ordered_names:
+                        common_vrs_ordered_names.append(actual_source_name)
+                    break
+    
+        other_common_sources = sorted([
+            name for name in all_loaded_versifications.keys()
+            if (args.common_vrs_dir / f"{name}.vrs").exists() and name not in common_vrs_ordered_names # Check original simple name
+            or (args.common_vrs_dir / f"{name}.vrs.txt").exists() and name not in common_vrs_ordered_names # Check with .txt
+        ])
+        common_vrs_ordered_names.extend(s for s in other_common_sources if s not in common_vrs_ordered_names)
+
+        project_vrs_names = sorted([
+            name for name in all_loaded_versifications.keys() if name not in common_vrs_ordered_names
+        ])
+        source_names_ordered = common_vrs_ordered_names + project_vrs_names
+    
+    if CAN_IMPORT_VERSE_REF:
+        # The order of builtin_vrs_source_names is already based on VersificationType enum order
+        common_vrs_ordered_names = builtin_vrs_source_names
+        
+        # Project VRS files are those not in the builtin_vrs_source_names list
+        project_vrs_names = sorted([
+            name for name in all_loaded_versifications.keys() if name not in common_vrs_ordered_names
+        ])
+        source_names_ordered = common_vrs_ordered_names + project_vrs_names
+    else:
+        # Fallback if imports failed (though we exit earlier if CAN_IMPORT_VERSE_REF is False for critical parts)
+        source_names_ordered = sorted(all_loaded_versifications.keys())
+
+    logger.info(f"Column order for VRS sources: {source_names_ordered}")
+-
+     for book_id_str, chapter_num_int in sorted_master_list:
+         row = {"Book": book_id_str, "Chapter": chapter_num_int}
+         book_num_int = book_id_to_number(book_id_str) if CAN_IMPORT_VERSE_REF else 0
+
+Key Changes and Explanations:
+
+Removed --common_vrs_dir Argument:
+The command-line argument --common_vrs_dir is removed.
+The get_default_paths() function no longer needs to define a default for it.
+The find_vrs_files function is removed as it's no longer used for common files.
+Loading Built-in Versifications:
+A new section is added after argument parsing to load built-in versifications.
+It iterates through VersificationType enum members (skipping UNKNOWN).
+Versification.get_builtin(vtype) is called for each type. This method internally finds and parses the correct .vrs.txt file from the sil-machine library's installed location.
+The loaded Versification object is stored in all_loaded_versifications using vrs_obj.name as the key. This name (e.g., "English", "Vulgate") comes from the Versification object itself (often derived from the # Versification "Name" line in the .vrs.txt file or _BUILTIN_VERSIFICATION_NAMES_TO_TYPES).
+builtin_vrs_source_names keeps track of these names in the order they are loaded (which is VersificationType enum order).
+Column Ordering:
+The complex logic for vtype_to_stem and matching against filenames in common_vrs_dir is removed.
+common_vrs_ordered_names is now directly populated from builtin_vrs_source_names.
+project_vrs_names are identified as those keys in all_loaded_versifications that are not in common_vrs_ordered_names, and then sorted alphabetically.
+The final source_names_ordered for columns is common_vrs_ordered_names + project_vrs_names.
+Default projects_dirs:
+I've updated the default for projects_dirs in get_default_paths to include both projects and private_projects as per common eBible structures:
+python
+"projects_dirs": [base_path / "projects", base_path / "private_projects"],
+You can adjust this if your structure is different.
+Benefits of this Change:
+
+Simplicity: The script no longer needs to know about the location or exact naming of common .vrs files; sil-machine handles it.
+Accuracy: You are guaranteed to be using the same versification definitions that the rest of the sil-machine library uses.
+Maintainability: If sil-machine updates its bundled .vrs.txt files, your script automatically uses the updated versions without any changes on your part (just a library update).
+Reduced Configuration: No need for the --common_vrs_dir argument.
+Now, you can delete the .vrs files from your c:\ebible_code\assets directory (or wherever you were keeping copies of the common ones), as they will no longer be used by this script for the standard versifications. The script will load them directly from the installed sil-machine package.

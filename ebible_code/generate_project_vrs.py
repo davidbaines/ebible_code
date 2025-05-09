@@ -1,5 +1,3 @@
-# filename: generate_project_vrs.py
-
 import argparse
 import csv
 import os

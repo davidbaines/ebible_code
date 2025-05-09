@@ -1,0 +1,1463 @@
+
+David Baines
+There was discussion earlier, captured in the Gemini_refactoring4.txt file that discusses how to use verse counts to determine the versification. The verse counts are now captured and stored in the EBIBLE_DATA_DIR/metadata/compare_versifications.csv file. That file also includes the verse counts for the standard versification systems in the first columns after the Book and Chapter columns.
+
+Here is a sample containing coulmn names and the first two rows of data:
+
+plaintext: 3 lines selected
+Use the data in the compare_versifications.csv to calculate the closest versification for each file.
+Update the Settings.xml line to reflect that versification. &lt;Versification&gt;4&lt;/Versification&gt; for English for example. What other information is required to complete this task? Are any clarifications needed.
+
+Gemini
+Okay, this is the logical next step: using the compare_versifications.csv to heuristically determine the best standard versification for each project and then updating their Settings.xml files.
+
+Based on the discussion in Gemini_refactoring4.txt and your current setup, here's a plan and the script to implement it:
+
+Plan:
+
+Read Configuration:
+
+Load the compare_versifications.csv file into a pandas DataFrame.
+Identify which columns represent standard versifications (e.g., "Original_verses", "English_verses") and which represent project versifications (e.g., "aai_verses").
+Create a mapping from the standard versification names (like "English") to their VersificationType enum members and thus to the integer value required for Settings.xml.
+For Each Project:
+
+Extract the project's verse count data from the DataFrame.
+Iterate through each standard versification:
+Extract the standard's verse count data.
+Calculate the following scores, normalizing by the project's content:
+Book Score: (Number of project books also defined in the standard versification) / (Total number of books in the project). Weight: 2.0.
+Chapter Score: (Number of project chapters in common books also defined in the standard versification) / (Total number of project chapters in common books). Weight: 1.0.
+Verse Count Score: (Number of project chapters in common books that have an exact verse count match with the standard versification) / (Total number of project chapters in common books). Weight: 2.5.
+Calculate a Combined Score using the weighted sum of the above.
+Identify the standard versification with the highest combined score for the current project.
+Determine the integer ID for this winning VersificationType.
+Update Settings.xml:
+
+Locate the project's Settings.xml file (e.g., EBIBLE_DATA_DIR/projects/<project_id>/Settings.xml).
+Parse the XML file.
+Find the <Versification> element.
+Update its text content with the new integer ID.
+Write the changes back to Settings.xml, preserving existing XML structure as much as possible.
+Prerequisites:
+
+The compare_versifications.csv file must exist in EBIBLE_DATA_DIR/metadata/.
+The sil-machine library must be installed and importable for VersificationType and Versification.
+The EBIBLE_DATA_DIR environment variable must be set.
+Project folders should be in EBIBLE_DATA_DIR/projects/ or EBIBLE_DATA_DIR/private_projects/ (or other locations if the script is adapted).
+Here's the Python script to perform these actions:
+
+python
+# filename: update_project_versification_settings.py
+
+import argparse
+import os
+import sys
+import logging
+from pathlib import Path
+import pandas as pd
+import xml.etree.ElementTree as ET
+from collections import defaultdict
+
+try:
+    from machine.scripture.verse_ref import Versification, VersificationType
+    CAN_IMPORT_MACHINE = True
+except ImportError:
+    print("ERROR: Could not import 'Versification' or 'VersificationType' from 'machine.scripture.verse_ref'.", file=sys.stderr)
+    print("Please ensure the 'sil-machine' library is correctly installed.", file=sys.stderr)
+    CAN_IMPORT_MACHINE = False
+    # sys.exit(1) # Exit if this is critical, or allow to proceed if script can degrade gracefully
+
+# --- Logging Setup ---
+log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=log_format)
+logger = logging.getLogger(__name__)
+
+# --- Scoring Weights ---
+WEIGHT_BOOK = 2.0
+WEIGHT_CHAPTER = 1.0
+WEIGHT_VERSE_COUNT = 2.5
+
+def get_default_paths():
+    """Gets default paths based on EBIBLE_DATA_DIR environment variable."""
+    ebible_data_dir_str = os.getenv("EBIBLE_DATA_DIR")
+    if not ebible_data_dir_str:
+        logger.error("EBIBLE_DATA_DIR environment variable is not set. Cannot determine default paths.")
+        return None
+    
+    base_path = Path(ebible_data_dir_str)
+    defaults = {
+        "csv_file": base_path / "metadata" / "compare_versifications.csv",
+        "project_dirs": [base_path / "projects", base_path / "private_projects"]
+    }
+    return defaults
+
+def get_standard_versification_map():
+    """
+    Creates a map from standard versification names (e.g., 'English')
+    to their VersificationType enum and integer value.
+    """
+    if not CAN_IMPORT_MACHINE:
+        logger.warning("Cannot generate standard versification map due to import failure.")
+        return {}
+        
+    std_vrs_map = {}
+    for vtype in VersificationType:
+        if vtype == VersificationType.UNKNOWN:
+            continue
+        try:
+            vrs_obj = Versification.get_builtin(vtype) # type: ignore
+            # Key by the name used in CSV columns (e.g., "English" from "English_verses")
+            std_vrs_map[vrs_obj.name] = {"type": vtype, "value": vtype.value}
+        except Exception as e:
+            logger.warning(f"Could not load built-in versification for {vtype.name}: {e}")
+    return std_vrs_map
+
+def get_project_data_from_df(df: pd.DataFrame, project_col_name: str) -> Dict[tuple, int]:
+    """Extracts {(book, chapter): verses} for a project, handling NaN."""
+    project_series = df[['Book', 'Chapter', project_col_name]].copy()
+    project_series.rename(columns={project_col_name: 'Verses'}, inplace=True)
+    project_series.dropna(subset=['Verses'], inplace=True) # Remove rows where verse count is NaN
+    project_series['Verses'] = project_series['Verses'].astype(int) # Ensure integer verse counts
+    return {(row.Book, row.Chapter): row.Verses for _, row in project_series.iterrows()}
+
+
+def calculate_similarity_score(
+    project_v_data: Dict[tuple, int], 
+    standard_v_data: Dict[tuple, int]
+    ) -> float:
+    """Calculates the similarity score between a project and a standard versification."""
+
+    project_books = {book for book, chap in project_v_data}
+    if not project_books:
+        return 0.0 # No books in project, no similarity
+
+    # --- Book Score ---
+    standard_books_defined = {book for book, chap in standard_v_data}
+    common_books = project_books.intersection(standard_books_defined)
+    book_score = len(common_books) / len(project_books) if project_books else 0.0
+
+    # --- Chapter Score (for common books) ---
+    project_chapters_in_common_books = {(b, c) for (b, c), v in project_v_data.items() if b in common_books}
+    standard_chapters_defined = {(b, c) for (b, c), v in standard_v_data.items()} # All chapters in standard
+    
+    common_chapters = project_chapters_in_common_books.intersection(standard_chapters_defined)
+    chapter_score = len(common_chapters) / len(project_chapters_in_common_books) if project_chapters_in_common_books else 0.0
+
+    # --- Verse Count Score (for common chapters present in project) ---
+    matching_verse_count_chapters = 0
+    # We only consider chapters that the project has and are also common with the standard's definition
+    chapters_for_verse_comparison = common_chapters 
+
+    for book, chap in chapters_for_verse_comparison:
+        if project_v_data.get((book, chap)) == standard_v_data.get((book, chap)):
+            matching_verse_count_chapters += 1
+    
+    verse_count_score = matching_verse_count_chapters / len(chapters_for_verse_comparison) if chapters_for_verse_comparison else 0.0
+    
+    # --- Combined Score ---
+    total_score = (WEIGHT_BOOK * book_score) + \
+                  (WEIGHT_CHAPTER * chapter_score) + \
+                  (WEIGHT_VERSE_COUNT * verse_count_score)
+    
+    # logger.debug(f"Scores: Book={book_score:.2f}, Chapter={chapter_score:.2f}, Verse={verse_count_score:.2f} -> Total={total_score:.2f}")
+    return total_score
+
+
+def update_settings_xml(project_path: Path, new_versification_value: int):
+    """Updates the Versification tag in the project's Settings.xml file."""
+    settings_file = project_path / "Settings.xml"
+    if not settings_file.is_file():
+        logger.warning(f"Settings.xml not found in {project_path}. Skipping update.")
+        return False
+
+    try:
+        # Register namespace to preserve it if present, though Paratext Settings.xml usually doesn't have one
+        # ET.register_namespace('', "http://www.w3.org/2001/XMLSchema-instance") # Example
+        
+        tree = ET.parse(str(settings_file))
+        root = tree.getroot()
+
+        versification_tag = root.find("Versification")
+        if versification_tag is None:
+            # If tag doesn't exist, create it (might be too intrusive, depends on desired behavior)
+            # versification_tag = ET.SubElement(root, "Versification")
+            logger.warning(f"<Versification> tag not found in {settings_file}. Skipping update.")
+            return False
+        
+        old_value = versification_tag.text
+        versification_tag.text = str(new_versification_value)
+        
+        # Write back with default XML declaration.
+        # ElementTree doesn't have great pretty print; lxml is better but adds dependency.
+        # For Settings.xml, this basic write is often okay.
+        tree.write(str(settings_file), encoding="utf-8", xml_declaration=True)
+        logger.info(f"Updated {settings_file}: <Versification> from '{old_value}' to '{new_versification_value}'.")
+        return True
+    except ET.ParseError as e:
+        logger.error(f"Error parsing XML file {settings_file}: {e}")
+    except Exception as e:
+        logger.error(f"Error updating XML file {settings_file}: {e}")
+    return False
+
+
+def main():
+    if not CAN_IMPORT_MACHINE:
+        logger.error("Critical 'machine' library components could not be imported. Exiting.")
+        sys.exit(1)
+
+    default_paths = get_default_paths()
+    if not default_paths:
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        description="Determines the closest standard versification for projects and updates their Settings.xml."
+    )
+    parser.add_argument(
+        "--csv_file",
+        type=Path,
+        default=default_paths["csv_file"],
+        help=f"Path to the 'compare_versifications.csv' file. Defaults to: {default_paths['csv_file']}",
+    )
+    parser.add_argument(
+        "--project_dirs",
+        type=Path,
+        nargs='+',
+        default=default_paths["project_dirs"],
+        help=f"List of root directories containing project folders. Defaults to: {default_paths['project_dirs']}",
+    )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Perform all calculations but do not write changes to Settings.xml files."
+    )
+
+    args = parser.parse_args()
+
+    if not args.csv_file.is_file():
+        logger.error(f"Comparison CSV file not found: {args.csv_file}")
+        sys.exit(1)
+
+    df = pd.read_csv(args.csv_file)
+    logger.info(f"Loaded comparison data from {args.csv_file} with {len(df)} rows.")
+
+    std_vrs_map = get_standard_versification_map()
+    if not std_vrs_map:
+        logger.error("No standard versification mapping available. Cannot proceed.")
+        sys.exit(1)
+
+    standard_vrs_cols = [f"{name}_verses" for name in std_vrs_map.keys() if f"{name}_verses" in df.columns]
+    logger.info(f"Found standard versification columns: {standard_vrs_cols}")
+
+    all_cols = df.columns.tolist()
+    project_cols = [
+        col for col in all_cols 
+        if col.endswith("_verses") and col not in standard_vrs_cols and col not in ["Book_verses", "Chapter_verses"]
+    ]
+    # Also remove 'Book' and 'Chapter' if they accidentally got into project_cols
+    project_cols = [p for p in project_cols if p not in ['Book', 'Chapter']]
+
+
+    logger.info(f"Found {len(project_cols)} project columns to process.")
+
+    for project_col_name in project_cols:
+        project_id = project_col_name.replace("_verses", "")
+        logger.info(f"--- Processing project: {project_id} ---")
+
+        project_v_data = get_project_data_from_df(df, project_col_name)
+        if not project_v_data:
+            logger.warning(f"No verse data found for project {project_id} in the CSV. Skipping.")
+            continue
+
+        best_score = -1.0
+        best_std_vrs_name = None
+
+        for std_col_name in standard_vrs_cols:
+            std_vrs_name_key = std_col_name.replace("_verses", "") # e.g. "English"
+            if std_vrs_name_key not in std_vrs_map:
+                logger.warning(f"Standard versification '{std_vrs_name_key}' from column '{std_col_name}' not in map. Skipping.")
+                continue
+
+            standard_v_data = get_project_data_from_df(df, std_col_name) # Reusing function
+            
+            current_score = calculate_similarity_score(project_v_data, standard_v_data)
+            logger.debug(f"Score for {project_id} vs {std_vrs_name_key}: {current_score:.4f}")
+
+            if current_score > best_score:
+                best_score = current_score
+                best_std_vrs_name = std_vrs_name_key
+        
+        if best_std_vrs_name:
+            vrs_type_info = std_vrs_map[best_std_vrs_name]
+            logger.info(f"Best match for {project_id}: {best_std_vrs_name} (Type: {vrs_type_info['type'].name}, Value: {vrs_type_info['value']}) with score: {best_score:.4f}")
+
+            if not args.dry_run:
+                # Find project path
+                project_path = None
+                for p_dir_root in args.project_dirs:
+                    candidate_path = p_dir_root / project_id
+                    if candidate_path.is_dir():
+                        project_path = candidate_path
+                        break
+                
+                if project_path:
+                    update_settings_xml(project_path, vrs_type_info['value'])
+                else:
+                    logger.warning(f"Could not find project directory for {project_id} in {args.project_dirs}. Cannot update Settings.xml.")
+            else:
+                logger.info(f"[DRY RUN] Would update Settings.xml for {project_id} to versification value {vrs_type_info['value']}.")
+        else:
+            logger.warning(f"Could not determine a best standard versification for project {project_id}.")
+
+    logger.info("Processing complete.")
+
+if __name__ == "__main__":
+    main()
+Use code with care. Learn more
+How to Run:
+
+Save the code above as update_project_versification_settings.py in your c:\ebible_code\ebible_code\ directory.
+Ensure EBIBLE_DATA_DIR is set and compare_versifications.csv exists in the metadata subfolder.
+Open your terminal/command prompt, navigate to c:\ebible_code\ebible_code\.
+Run the script:
+Dry Run (recommended first):
+bash
+poetry run python update_project_versification_settings.py --dry_run
+Actual Run (to modify Settings.xml files):
+bash
+poetry run python update_project_versification_settings.py
+You can also specify paths if they differ from the defaults:
+bash
+poetry run python update_project_versification_settings.py --csv_file /path/to/your.csv --project_dirs /path/to/projects1 /path/to/projects2
+Key Points in the Script:
+
+Standard Versification Map (get_standard_versification_map): Uses Versification.get_builtin(vtype).name to get the canonical names (e.g., "English", "Vulgate") which are assumed to match the prefixes in your CSV column names (e.g., "English_verses").
+Data Extraction (get_project_data_from_df): Pulls data for a specific project or standard versification from the main DataFrame, converting it into a {(book, chapter): verses} dictionary and handling NaN values by dropping them.
+Scoring Logic (calculate_similarity_score): Implements the weighted scoring based on book presence, chapter presence (in common books), and verse count matches (in common chapters). Normalization is done against the project's content.
+XML Update (update_settings_xml): Uses xml.etree.ElementTree to parse, find the <Versification> tag, update its text, and write the file back. It's basic but should work for this specific tag update.
+Dry Run Mode: The --dry_run flag allows you to see what changes would be made without actually modifying any files.
+Project Directory Discovery: The script iterates through the provided --project_dirs to find the folder for each project_id to locate its Settings.xml.
+This script should provide a good solution for automating the update of versification settings based on your heuristic. Remember to review the dry run output carefully before running it live.
+
+Rate this answer: 
+External Sources (1)
+Context Sources (3)
+
+David Baines
+Could we add this to the compare_versifications.py script and maybe rename that to update_versifications.py. Then the pandas dataframe is already available.
+
+
+Gemini
+Okay, this is a great idea! Combining these two scripts will streamline the workflow, allowing you to generate the comparison CSV and then immediately use it to update project settings, all in one go. The pandas DataFrame can indeed be passed directly, avoiding the need to write and then re-read the CSV if both operations are performed in the same run.
+
+Here's how we can modify compare_versifications.py, rename it to update_versifications.py, and integrate the functionality:
+
+1. Rename the file: Manually rename c:\ebible_code\ebible_code\compare_versifications.py to c:\ebible_code\ebible_code\update_versifications.py.
+
+2. Apply the following changes to the (newly renamed) update_versifications.py file:
+
+update_versifications.py
+-35
++300
+# filename: compare_versifications.py
+# filename: update_versifications.py
+
+import argparse
+import os
+Unchanged lines
+import sys
+import logging
+from pathlib import Path
+import xml.etree.ElementTree as ET
+from typing import Dict, List, Tuple, Set
+from dotenv import load_dotenv
+load_dotenv()
+Unchanged lines
+    # Note: book_number_to_id and LAST_BOOK might be useful later for creating the master list
+    logger.info(f"Successfully imported VersificationType from machine.scripture: {VersificationType.ENGLISH}")
+    CAN_IMPORT_VERSE_REF = True
+    # For consistency with the merged code, we can alias this or pick one.
+    # Let's stick to CAN_IMPORT_VERSE_REF as it's more specific to the scripture module.
+    CAN_IMPORT_MACHINE = CAN_IMPORT_VERSE_REF 
+except ImportError as e:
+    print(f"Warning: Could not import from verse_ref.py: {e}.", file=sys.stderr)
+    sys.exit(1)
+Unchanged lines
+# Regex for parsing chapter:verse entries in VRS files
+# Example line: GEN 1:31 2:25 3:24
+VRS_LINE_PATTERN = re.compile(r"^([A-Z0-9]{3})\s+(.*)")
+
+# --- Scoring Weights (from update_project_versification_settings.py) ---
+WEIGHT_BOOK = 2.0
+WEIGHT_CHAPTER = 1.0
+WEIGHT_VERSE_COUNT = 2.5
+
+
+def find_project_vrs_files(projects_root_dirs: List[Path]) -> Dict[str, Path]:
+Unchanged lines
+    defaults = {
+        "common_vrs_dir": base_path / "assets",
+        "projects_dirs": [base_path / "projects", base_path / "private_projects"], # Default to a list
+        "output_csv": base_path / "metadata" / "compare_versifications.csv"
+        "csv_file": base_path / "metadata" / "compare_versifications.csv" # Renamed from output_csv
+    }
+    return defaults
+
+
+def main():
+# --- Helper functions for Settings Update (from update_project_versification_settings.py) ---
+def get_standard_versification_map() -> Dict[str, Dict]:
+    """
+    Creates a map from standard versification names (e.g., 'English')
+    to their VersificationType enum and integer value.
+    """
+    if not CAN_IMPORT_MACHINE: # or CAN_IMPORT_VERSE_REF
+        logger.warning("Cannot generate standard versification map due to import failure.")
+        return {}
+        
+    std_vrs_map = {}
+    for vtype in VersificationType: # type: ignore
+        if vtype == VersificationType.UNKNOWN: # type: ignore
+            continue
+        try:
+            vrs_obj = Versification.get_builtin(vtype) # type: ignore
+            std_vrs_map[vrs_obj.name] = {"type": vtype, "value": vtype.value} # type: ignore
+        except Exception as e:
+            logger.warning(f"Could not load built-in versification for {vtype.name}: {e}") # type: ignore
+    return std_vrs_map
+
+def get_data_from_df_for_scoring(df: pd.DataFrame, col_name: str) -> Dict[tuple, int]:
+    """Extracts {(book, chapter): verses} for a specific column from the DataFrame."""
+    # Ensure 'Book' and 'Chapter' columns exist
+    if 'Book' not in df.columns or 'Chapter' not in df.columns:
+        logger.error("DataFrame for scoring is missing 'Book' or 'Chapter' columns.")
+        return {}
+    if col_name not in df.columns:
+        logger.error(f"Column '{col_name}' not found in DataFrame for scoring.")
+        return {}
+
+    series_data = df[['Book', 'Chapter', col_name]].copy()
+    series_data.rename(columns={col_name: 'Verses'}, inplace=True)
+    series_data.dropna(subset=['Verses'], inplace=True)
+    # Convert to int, coercing errors to NaN, then dropna again if any failed conversion
+    series_data['Verses'] = pd.to_numeric(series_data['Verses'], errors='coerce')
+    series_data.dropna(subset=['Verses'], inplace=True)
+    series_data['Verses'] = series_data['Verses'].astype(int)
+    return {(row.Book, row.Chapter): row.Verses for _, row in series_data.iterrows()}
+
+def calculate_similarity_score(
+    project_v_data: Dict[tuple, int], 
+    standard_v_data: Dict[tuple, int]
+    ) -> float:
+    """Calculates the similarity score between a project and a standard versification."""
+    project_books = {book for book, chap in project_v_data}
+    if not project_books:
+        return 0.0
+
+    standard_books_defined = {book for book, chap in standard_v_data}
+    common_books = project_books.intersection(standard_books_defined)
+    book_score = len(common_books) / len(project_books) if project_books else 0.0
+
+    project_chapters_in_common_books = {(b, c) for (b, c), v in project_v_data.items() if b in common_books}
+    standard_chapters_defined = {(b, c) for (b, c), v in standard_v_data.items()}
+    
+    common_chapters = project_chapters_in_common_books.intersection(standard_chapters_defined)
+    chapter_score = len(common_chapters) / len(project_chapters_in_common_books) if project_chapters_in_common_books else 0.0
+
+    matching_verse_count_chapters = 0
+    chapters_for_verse_comparison = common_chapters 
+
+    for book, chap in chapters_for_verse_comparison:
+        if project_v_data.get((book, chap)) == standard_v_data.get((book, chap)):
+            matching_verse_count_chapters += 1
+    
+    verse_count_score = matching_verse_count_chapters / len(chapters_for_verse_comparison) if chapters_for_verse_comparison else 0.0
+    
+    total_score = (WEIGHT_BOOK * book_score) + \
+                  (WEIGHT_CHAPTER * chapter_score) + \
+                  (WEIGHT_VERSE_COUNT * verse_count_score)
+    return total_score
+
+def update_settings_xml(project_path: Path, new_versification_value: int):
+    """Updates the Versification tag in the project's Settings.xml file."""
+    settings_file = project_path / "Settings.xml"
+    if not settings_file.is_file():
+        logger.warning(f"Settings.xml not found in {project_path}. Skipping update.")
+        return False
+    try:
+        tree = ET.parse(str(settings_file))
+        root = tree.getroot()
+        versification_tag = root.find("Versification")
+        if versification_tag is None:
+            logger.warning(f"<Versification> tag not found in {settings_file}. Skipping update.")
+            return False
+        old_value = versification_tag.text
+        versification_tag.text = str(new_versification_value)
+        tree.write(str(settings_file), encoding="utf-8", xml_declaration=True)
+        logger.info(f"Updated {settings_file}: <Versification> from '{old_value}' to '{new_versification_value}'.")
+        return True
+    except ET.ParseError as e:
+        logger.error(f"Error parsing XML file {settings_file}: {e}")
+    except Exception as e:
+        logger.error(f"Error updating XML file {settings_file}: {e}")
+    return False
+
+def generate_comparison_csv(args: argparse.Namespace) -> pd.DataFrame | None:
+    """Generates the versification comparison CSV file."""
+    logger.info("--- Starting CSV Generation Phase ---")
+    default_paths = get_default_paths()
+
+    parser = argparse.ArgumentParser(
+Unchanged lines
+        help=f"Root directory/directories containing Paratext project folders. Defaults to: {default_paths['projects_dirs']}",
+    )
+    parser.add_argument(
+        "--output_csv",
+        type=Path,
+        required=False,
+        default=default_paths["output_csv"],
+        help=f"Path to save the output comparison CSV file. Defaults to: {default_paths['output_csv']}",
+    )
+    args = parser.parse_args()
+
+    # --- 1. Find and parse all VRS files ---
+        "--csv_file", # Renamed from output_csv
+        type=Path,
+        required=False,
+        default=default_paths["csv_file"],
+        help=f"Path to save/load the comparison CSV file. Defaults to: {default_paths['csv_file']}",
+    )
+    # Args are parsed in main, this function receives them.
+
+    # --- 1. Load/Parse all VRS files ---
+    # Store loaded Versification objects: {source_name: Versification_object}
+    all_loaded_versifications: Dict[str, Versification] = {}
+    
+Unchanged lines
+    builtin_vrs_source_names = []
+    if CAN_IMPORT_VERSE_REF:
+        logger.info("Loading built-in versifications from sil-machine library...")
+        for vtype in VersificationType:
+            if vtype == VersificationType.UNKNOWN: # Skip UNKNOWN type
+        for vtype in VersificationType: # type: ignore
+            if vtype == VersificationType.UNKNOWN: # type: ignore
+                continue
+            try:
+                # The name of the versification object will be like "English", "Vulgate"
+                # as defined by Versification._BUILTIN_VERSIFICATION_NAMES_TO_TYPES
+                # as defined by Versification._BUILTIN_VERSIFICATION_NAMES_TO_TYPES # type: ignore
+                vrs_obj = Versification.get_builtin(vtype)
+                # Use the official name from the vrs_obj for the dictionary key and column name
+                all_loaded_versifications[vrs_obj.name] = vrs_obj
+Unchanged lines
+                logger.info(f"Successfully loaded built-in versification: {vrs_obj.name} (Type: {vtype.name})")
+            except Exception as e:
+                logger.error(f"Failed to load built-in versification for type {vtype.name}: {e}")
+
+    
+    # Parse project-specific VRS files
+    logger.info(f"Looking for project VRS files in: {args.projects_dirs}")
+    project_vrs_map = find_project_vrs_files(args.projects_dirs)
+Unchanged lines
+        logger.info(f"Parsing project VRS: {vrs_file.name} (for project '{project_name}')")
+        try:
+            # Use project_name as the Versification object's name
+            loaded_vrs = Versification.load(vrs_file, fallback_name=project_name)
+            loaded_vrs = Versification.load(vrs_file, name=project_name) # Use name instead of fallback_name
+            all_loaded_versifications[project_name] = loaded_vrs
+        except Exception as e:
+            logger.error(f"Failed to load project VRS file {vrs_file.name} for project {project_name}: {e}")
+
+
+    if not all_loaded_versifications:
+        logger.error("No VRS files (common or project) were found or parsed. Cannot generate comparison. Exiting.")
+        sys.exit(1)
+        return None
+
+    # --- 2. Create a master list of all unique (Book, Chapter) pairs ---
+    master_book_chapter_set: Set[Tuple[str, int]] = set()
+    for vrs_obj in all_loaded_versifications.values():
+        for book_num_int in range(1, vrs_obj.get_last_book() + 1):
+        for book_num_int in range(1, vrs_obj.get_last_book() + 1): # type: ignore
+            book_id_str = book_number_to_id(book_num_int)
+            if not book_id_str: # Skip if book_number_to_id returns empty (e.g., invalid num)
+                continue
+            for chapter_num_int in range(1, vrs_obj.get_last_chapter(book_num_int) + 1):
+            for chapter_num_int in range(1, vrs_obj.get_last_chapter(book_num_int) + 1): # type: ignore
+                # Check if the chapter actually has verses defined, not just implied by get_last_chapter
+                if vrs_obj.get_last_verse(book_num_int, chapter_num_int) > 0:
+                    master_book_chapter_set.add((book_id_str, chapter_num_int))
+Unchanged lines
+
+    if not master_book_chapter_set:
+        logger.error("No book/chapter data found in any parsed VRS files. Exiting.")
+        sys.exit(1)
+        return None
+        
+    # Sort the master list: by book (using BOOK_SORT_KEY), then by chapter number
+    sorted_master_list = sorted(
+Unchanged lines
+
+    # --- 3. Prepare data for DataFrame ---
+    output_data_list = []
+    common_vrs_ordered_names = []
+    # common_vrs_ordered_names will be builtin_vrs_source_names
+    
+    if CAN_IMPORT_VERSE_REF:
+        # The order of builtin_vrs_source_names is already based on VersificationType enum order
+        common_vrs_ordered_names = builtin_vrs_source_names
+        # common_vrs_ordered_names = builtin_vrs_source_names # This is already set
+        
+        # Project VRS files are those not in the builtin_vrs_source_names list
+        project_vrs_names = sorted([
+            name for name in all_loaded_versifications.keys() if name not in common_vrs_ordered_names
+            name for name in all_loaded_versifications.keys() if name not in builtin_vrs_source_names
+        ])
+        source_names_ordered = common_vrs_ordered_names + project_vrs_names
+        source_names_ordered = builtin_vrs_source_names + project_vrs_names
+    else:
+        # Fallback if imports failed (though we exit earlier if CAN_IMPORT_VERSE_REF is False for critical parts)
+        source_names_ordered = sorted(all_loaded_versifications.keys())
+        source_names_ordered = sorted(list(all_loaded_versifications.keys()))
+
+    logger.info(f"Column order for VRS sources: {source_names_ordered}")
+    for book_id_str, chapter_num_int in sorted_master_list:
+Unchanged lines
+            verse_count = None
+            if vrs_obj and CAN_IMPORT_VERSE_REF and book_num_int > 0:
+                # Check if book and chapter are within the defined range for this vrs_obj
+                if book_num_int <= vrs_obj.get_last_book() and \
+                   chapter_num_int <= vrs_obj.get_last_chapter(book_num_int):
+                if book_num_int <= vrs_obj.get_last_book() and \
+                   chapter_num_int <= vrs_obj.get_last_chapter(book_num_int): # type: ignore
+                    verse_count = vrs_obj.get_last_verse(book_num_int, chapter_num_int)
+                    if verse_count == 0 and not (book_num_int > vrs_obj.get_last_book() or chapter_num_int > vrs_obj.get_last_chapter(book_num_int)):
+                    if verse_count == 0 and not (book_num_int > vrs_obj.get_last_book() or \
+                                                 chapter_num_int > vrs_obj.get_last_chapter(book_num_int)): # type: ignore
+                        # If get_last_verse returns 0 for a chapter that *should* exist,
+                        # it might mean the chapter is defined but has no verses listed (or 0 verses).
+                        # For CSV, we might prefer to show 0 rather than NaN in this specific case.
+Unchanged lines
+    df = df[fixed_cols + data_cols]
+
+    try:
+        args.output_csv.parent.mkdir(parents=True, exist_ok=True) # Ensure output directory exists
+        df.to_csv(args.output_csv, index=False, encoding='utf-8')
+        logger.info(f"Successfully generated comparison CSV: {args.output_csv}")
+        args.csv_file.parent.mkdir(parents=True, exist_ok=True) # Ensure output directory exists
+        df.to_csv(args.csv_file, index=False, encoding='utf-8')
+        logger.info(f"Successfully generated comparison CSV: {args.csv_file}")
+        return df
+    except Exception as e:
+        logger.error(f"Error writing CSV file {args.output_csv}: {e}")
+        logger.error(f"Error writing CSV file {args.csv_file}: {e}")
+        return None
+
+def update_versification_settings(df: pd.DataFrame, args: argparse.Namespace):
+    """
+    Determines the closest standard versification for projects using data from the DataFrame
+    and updates their Settings.xml files.
+    """
+    logger.info("--- Starting Settings Update Phase ---")
+
+    std_vrs_map = get_standard_versification_map()
+    if not std_vrs_map:
+        logger.error("No standard versification mapping available. Cannot proceed with settings update.")
+        return
+
+    # Standard versification columns in the CSV (e.g., "English_verses")
+    # These names come from Versification.get_builtin(vtype).name
+    standard_vrs_csv_cols = [f"{name}_verses" for name in std_vrs_map.keys() if f"{name}_verses" in df.columns]
+    logger.info(f"Found standard versification columns for scoring: {standard_vrs_csv_cols}")
+
+    # Project columns are all other "*_verses" columns
+    all_verses_cols = [col for col in df.columns if col.endswith("_verses")]
+    project_csv_cols = [col for col in all_verses_cols if col not in standard_vrs_csv_cols]
+    
+    logger.info(f"Found {len(project_csv_cols)} project columns in CSV to process for settings update.")
+
+    for project_col_name in project_csv_cols: # e.g., "aai_verses"
+        project_id = project_col_name.replace("_verses", "") # e.g., "aai"
+        logger.info(f"--- Processing project for settings update: {project_id} ---")
+
+        project_v_data = get_data_from_df_for_scoring(df, project_col_name)
+        if not project_v_data:
+            logger.warning(f"No verse data found for project {project_id} in the DataFrame. Skipping settings update for this project.")
+            continue
+
+        best_score = -1.0
+        best_std_vrs_name_key = None # This will be the key for std_vrs_map (e.g., "English")
+
+        for std_csv_col_name in standard_vrs_csv_cols: # e.g., "English_verses"
+            std_vrs_name_key = std_csv_col_name.replace("_verses", "") # e.g. "English"
+            if std_vrs_name_key not in std_vrs_map:
+                logger.warning(f"Standard versification '{std_vrs_name_key}' from column '{std_csv_col_name}' not in map. Skipping comparison.")
+                continue
+
+            standard_v_data = get_data_from_df_for_scoring(df, std_csv_col_name)
+            if not standard_v_data:
+                logger.debug(f"No data for standard versification {std_vrs_name_key} to compare with {project_id}.")
+                continue
+            
+            current_score = calculate_similarity_score(project_v_data, standard_v_data)
+            logger.debug(f"Score for {project_id} vs {std_vrs_name_key}: {current_score:.4f}")
+
+            if current_score > best_score:
+                best_score = current_score
+                best_std_vrs_name_key = std_vrs_name_key
+        
+        if best_std_vrs_name_key:
+            vrs_type_info = std_vrs_map[best_std_vrs_name_key]
+            logger.info(f"Best match for {project_id}: {best_std_vrs_name_key} (Type: {vrs_type_info['type'].name}, Value: {vrs_type_info['value']}) with score: {best_score:.4f}")
+
+            if not args.dry_run:
+                project_path = None
+                for p_dir_root in args.projects_dirs:
+                    candidate_path = p_dir_root / project_id
+                    if candidate_path.is_dir():
+                        project_path = candidate_path
+                        break
+                
+                if project_path:
+                    update_settings_xml(project_path, vrs_type_info['value'])
+                else:
+                    logger.warning(f"Could not find project directory for {project_id} in {args.projects_dirs}. Cannot update Settings.xml.")
+            else:
+                logger.info(f"[DRY RUN] Would update Settings.xml for {project_id} to versification value {vrs_type_info['value']}.")
+        else:
+            logger.warning(f"Could not determine a best standard versification for project {project_id}.")
+
+    logger.info("Settings update phase complete.")
+
+
+def main():
+    if not CAN_IMPORT_VERSE_REF: # or CAN_IMPORT_MACHINE
+        logger.error("Critical 'machine' library components could not be imported. Exiting.")
+        sys.exit(1)
+
+    default_paths = get_default_paths()
+    if not default_paths: # Should not happen if EBIBLE_DATA_DIR is set
+        sys.exit(1)
+
+    parser = argparse.ArgumentParser(
+        description="Generates a versification comparison CSV and/or updates project Settings.xml based on it."
+    )
+    # Arguments for CSV generation and general paths
+    parser.add_argument(
+        "--projects_dirs",
+        type=Path,
+        nargs='+',
+        required=False,
+        default=default_paths["projects_dirs"],
+        help=f"Root directory/directories containing Paratext project folders. Defaults to: {default_paths['projects_dirs']}",
+    )
+    parser.add_argument(
+        "--csv_file",
+        type=Path,
+        required=False,
+        default=default_paths["csv_file"],
+        help=f"Path to save (if generating) or load (if updating only) the comparison CSV. Defaults to: {default_paths['csv_file']}",
+    )
+    # Arguments to control script actions
+    parser.add_argument(
+        "--skip_csv_generation",
+        action="store_true",
+        help="Skip the CSV generation phase. Requires --csv_file to exist if --update_settings is active.",
+    )
+    parser.add_argument(
+        "--skip_settings_update",
+        action="store_true",
+        help="Skip the project Settings.xml update phase.",
+    )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Perform all calculations for settings update but do not write changes to Settings.xml files."
+    )
+    args = parser.parse_args()
+
+    comparison_df = None
+
+    if not args.skip_csv_generation:
+        comparison_df = generate_comparison_csv(args)
+        if comparison_df is None:
+            logger.error("CSV generation failed. Aborting.")
+            sys.exit(1)
+    else:
+        logger.info("Skipping CSV generation as per --skip_csv_generation flag.")
+
+    if not args.skip_settings_update:
+        if comparison_df is None: # CSV generation was skipped, try to load
+            if args.csv_file.is_file():
+                logger.info(f"Loading comparison data from existing CSV: {args.csv_file}")
+                try:
+                    comparison_df = pd.read_csv(args.csv_file)
+                except Exception as e:
+                    logger.error(f"Failed to load CSV file {args.csv_file}: {e}")
+                    sys.exit(1)
+            else:
+                logger.error(f"CSV file {args.csv_file} not found, and CSV generation was skipped. Cannot proceed with settings update.")
+                sys.exit(1)
+        
+        if comparison_df is not None:
+            update_versification_settings(comparison_df, args)
+        else:
+            # This case should ideally be caught above, but as a safeguard:
+            logger.error("No DataFrame available for settings update. Aborting update phase.")
+    else:
+        logger.info("Skipping settings update as per --skip_settings_update flag.")
+
+    logger.info("Processing complete.")
+ 
+ if __name__ == "__main__":
+     main()
+
+Key Changes and Explanations:
+
+Filename: The conceptual rename to update_versifications.py.
+New Imports: xml.etree.ElementTree as ET.
+Scoring Weights: Added WEIGHT_BOOK, WEIGHT_CHAPTER, WEIGHT_VERSE_COUNT.
+Helper Functions for Update Logic:
+get_standard_versification_map(): Determines mapping from standard versification names to their VersificationType enum and integer value.
+get_data_from_df_for_scoring(): (Renamed from get_project_data_from_df to avoid potential confusion and to clarify its role with the main DataFrame). Extracts verse count data for a specific column (project or standard) from the main DataFrame.
+calculate_similarity_score(): Calculates the heuristic score.
+update_settings_xml(): Updates the <Versification> tag in Settings.xml.
+main() Function Restructuring:
+The main() function now orchestrates two main phases.
+Argument Parsing: New arguments --skip_csv_generation, --skip_settings_update, and --dry_run are added to control the script's behavior. The --output_csv argument is renamed to --csv_file as it's now used for both output and potential input.
+generate_comparison_csv(args) function: Encapsulates the original logic of compare_versifications.py to produce the CSV. It now returns the generated DataFrame.
+update_versification_settings(df, args) function: Encapsulates the logic from the previous update_project_versification_settings.py script. It takes the DataFrame (either freshly generated or loaded) and updates Settings.xml files.
+DataFrame Flow:
+If CSV generation is active, the resulting DataFrame (comparison_df) is passed directly to update_versification_settings.
+If CSV generation is skipped, update_versification_settings attempts to load the DataFrame from the --csv_file.
+Column Identification for Update Logic:
+standard_vrs_csv_cols: Identified using std_vrs_map.keys(). These are the columns for "English_verses", "Vulgate_verses", etc.
+project_csv_cols: Derived by taking all *_verses columns from the DataFrame and removing the standard ones.
+Error Handling & Logging: Enhanced to cover new scenarios like failing to load a pre-existing CSV.
+Consistency:
+CAN_IMPORT_VERSE_REF is used consistently for machine.scripture imports.
+Versification.load(vrs_file, name=project_name) is used for loading project VRS files to ensure the name attribute of the Versification object is set correctly, which is then used as the column header.
+How to Run the New Script:
+
+(Assuming you've renamed the file to update_versifications.py)
+
+Generate CSV and Update Settings (Default):
+bash
+poetry run python update_versifications.py
+Only Generate CSV:
+bash
+poetry run python update_versifications.py --skip_settings_update
+Only Update Settings (assuming compare_versifications.csv already exists):
+bash
+poetry run python update_versifications.py --skip_csv_generation
+Dry Run for Settings Update (Generate CSV then dry run update):
+bash
+poetry run python update_versifications.py --dry_run
+Dry Run for Settings Update (using existing CSV):
+bash
+poetry run python update_versifications.py --skip_csv_generation --dry_run
+Specify Custom CSV File Path:
+bash
+poetry run python update_versifications.py --csv_file /path/to/my_custom_comparison.csv
+This combined script should be much more versatile and efficient for your workflow!
+
+Rate this answer: 
+Context Sources (3)
+
+David Baines
+I get this error when I run with the --dry-run option
+
+
+Gemini
+It sounds like you're encountering an issue when using the --dry_run option. While the specific error message isn't provided, I've reviewed the update_versifications.py script, particularly how arguments are handled.
+
+One area for improvement in code clarity and quality is within the generate_comparison_csv function. This function currently defines its own argparse.ArgumentParser instance and adds arguments to it. However, this local parser is never actually used to parse command-line arguments; the function receives an already-parsed args object from the main function. This local parser setup can be misleading and is redundant.
+
+Removing this local parser and its associated default_paths call (as the defaults are handled by the main parser) will make the generate_comparison_csv function cleaner and more straightforward, as it will clearly rely only on the arguments passed to it.
+
+Here's a diff with the suggested changes:
+
+update_versifications.py
+-22
++2
+def generate_comparison_csv(args: argparse.Namespace) -> pd.DataFrame | None:
+    """Generates the versification comparison CSV file."""
+    logger.info("--- Starting CSV Generation Phase ---")
+    default_paths = get_default_paths()
+
+    parser = argparse.ArgumentParser(
+        description="Compares verse counts from multiple .vrs files and project-specific .vrs files."
+    )
+    parser.add_argument(
+        "--projects_dirs",
+        type=Path,
+        nargs='+',
+        required=False,
+        default=default_paths["projects_dirs"],
+        help=f"Root directory/directories containing Paratext project folders. Defaults to: {default_paths['projects_dirs']}",
+    )
+    parser.add_argument(
+        "--csv_file", # Renamed from output_csv
+        type=Path,
+        required=False,
+        default=default_paths["csv_file"],
+        help=f"Path to save/load the comparison CSV file. Defaults to: {default_paths['csv_file']}",
+    )
+    # Args are parsed in main, this function receives them.
+
+    # The 'args' parameter contains all necessary parsed arguments from the main parser,
+    # including projects_dirs and csv_file.
+    # --- 1. Load/Parse all VRS files ---
+    # Store loaded Versification objects: {source_name: Versification_object}
+    all_loaded_versifications: Dict[str, Versification] = {}
+
+Explanation of Changes:
+
+Removed local ArgumentParser: The ArgumentParser instance created within generate_comparison_csv and its associated add_argument calls have been removed.
+Removed local default_paths call: The line default_paths = get_default_paths() within generate_comparison_csv was removed because it was only used to provide default values to the now-removed local parser. The args object passed into this function from main will already have these paths correctly resolved based on command-line input or the defaults defined in main's parser.
+These changes improve the script's clarity by ensuring that argument parsing is centralized in the main function, and other functions like generate_comparison_csv simply consume the parsed arguments passed to them.
+
+If the error you're experiencing persists after this cleanup or is different, providing the specific error message would be very helpful for further diagnosis.
+
+Rate this answer: 
+Context Sources (3)
+
+David Baines
+Here's the error. It is happening with the new code too. C:\ebible_code>poetry run python ebible_code/update_versifications.py --dry-run 2025-05-06 17:21:10,685 - INFO - main - Successfully imported VersificationType from machine.scripture: 4 Traceback (most recent call last): File "C:\ebible_code\ebible_code\update_versifications.py", line 198, in <module> def generate_comparison_csv(args: argparse.Namespace) -> pd.DataFrame | None: TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+
+
+Gemini
+Ah, that TypeError is a classic sign of a type hinting feature being used with an older Python version!
+
+The | operator for union types in type hints (like pd.DataFrame | None) was officially introduced in Python 3.10. If your environment is running Python 3.9 or earlier, it won't understand this syntax, leading to the TypeError when the script is parsed.
+
+The fix is to use the typing.Optional for this specific case, or typing.Union for more general unions, which are compatible with older Python versions.
+
+Here's the diff to make that change:
+
+update_versifications.py
+-2
++2
+import logging
+from pathlib import Path
+import xml.etree.ElementTree as ET
+from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Tuple, Set, Optional
+from dotenv import load_dotenv
+load_dotenv()
+
+Unchanged lines
+        logger.error(f"Error updating XML file {settings_file}: {e}")
+    return False
+
+def generate_comparison_csv(args: argparse.Namespace) -> pd.DataFrame | None:
+def generate_comparison_csv(args: argparse.Namespace) -> Optional[pd.DataFrame]:
+    """Generates the versification comparison CSV file."""
+    logger.info("--- Starting CSV Generation Phase ---")
+    # The 'args' parameter contains all necessary parsed arguments from the main parser,
+
+Key Changes:
+
+Import Optional: Added Optional to the import from the typing module:
+python
+from typing import Dict, List, Tuple, Set, Optional
+Updated Return Type: Changed the return type annotation of generate_comparison_csv:
+From: -> pd.DataFrame | None
+To: -> Optional[pd.DataFrame]
+This change should resolve the TypeError and allow your script to run correctly on Python versions older than 3.10. Give it a try with the --dry-run option again!
+
+Rate this answer: 
+Context Sources (3)
+
+David Baines
+The previous code compare_versifications.py worked correctly for updating the compare_versifications.csv file. This code does add the standard versifications, but omits all of the project versifications from that file. Then there are no projects to update:
+
+plaintext: 1 lines selected
+
+Gemini
+You've correctly identified the issue! The logic for distinguishing between "standard" (built-in) versifications and "project" versifications in the update_versification_settings function seems to have a flaw that results in project_csv_cols being empty.
+
+Let's look at how these are determined in update_versification_settings:
+
+standard_vrs_csv_cols is built from std_vrs_map.keys(). The std_vrs_map is populated by iterating through VersificationType and getting vrs_obj.name from Versification.get_builtin(vtype). This part seems correct for identifying standard versification names like "English", "Vulgate", etc.
+
+project_csv_cols is then derived by taking all_verses_cols (all columns ending in _verses from the DataFrame) and removing standard_vrs_csv_cols.
+
+The problem likely lies in how the all_loaded_versifications dictionary (and subsequently the DataFrame column names) are populated in generate_comparison_csv versus how standard_vrs_csv_cols is created.
+
+In generate_comparison_csv:
+
+Built-in versifications are added to all_loaded_versifications using vrs_obj.name as the key (e.g., "English").
+Project-specific VRS files are loaded, and Versification.load(vrs_file, name=project_name) is used. This means the key in all_loaded_versifications for a project like "aai" will be "aai".
+The column names in the DataFrame become f"{source_name}_verses", so we'd have "English_verses", "Vulgate_verses", "aai_verses", etc.
+
+In update_versification_settings:
+
+standard_vrs_csv_cols becomes ["English_verses", "Vulgate_verses", ...].
+all_verses_cols correctly contains all *_verses columns: ["English_verses", "Vulgate_verses", ..., "aai_verses", ...].
+The line project_csv_cols = [col for col in all_verses_cols if col not in standard_vrs_csv_cols] should then correctly identify ["aai_verses", ...] as project columns.
+The most likely culprit is a subtle mismatch or an issue in how the df.columns are being handled or how the list comprehensions are interacting.
+
+Let's re-examine the logic in update_versification_settings for identifying project columns.
+
+The current logic:
+
+python
+    # Standard versification columns in the CSV (e.g., "English_verses")
+    # These names come from Versification.get_builtin(vtype).name
+    standard_vrs_csv_cols = [f"{name}_verses" for name in std_vrs_map.keys() if f"{name}_verses" in df.columns]
+    logger.info(f"Found standard versification columns for scoring: {standard_vrs_csv_cols}")
+
+    # Project columns are all other "*_verses" columns
+    all_verses_cols = [col for col in df.columns if col.endswith("_verses")]
+    project_csv_cols = [col for col in all_verses_cols if col not in standard_vrs_csv_cols]
+    
+    logger.info(f"Found {len(project_csv_cols)} project columns in CSV to process for settings update.")
+This logic appears sound. If standard_vrs_csv_cols correctly contains only the standard ones, then the set difference should yield the project ones.
+
+Could there be an issue with std_vrs_map.keys() not perfectly matching the names used when Versification.get_builtin(vtype) was called during CSV generation? The vrs_obj.name should be consistent.
+
+Let's add some debug logging to update_versification_settings to see the contents of these lists right before project_csv_cols is calculated. This will help pinpoint where the discrepancy arises.
+
+update_versifications.py
+-1
++5
+    # Standard versification columns in the CSV (e.g., "English_verses")
+    # These names come from Versification.get_builtin(vtype).name
+    standard_vrs_csv_cols = [f"{name}_verses" for name in std_vrs_map.keys() if f"{name}_verses" in df.columns]
+    logger.info(f"Found standard versification columns for scoring: {standard_vrs_csv_cols}")
+    logger.debug(f"std_vrs_map.keys(): {list(std_vrs_map.keys())}")
+    logger.info(f"Identified standard versification CSV columns for scoring: {standard_vrs_csv_cols}")
+
+    # Project columns are all other "*_verses" columns
+    all_verses_cols = [col for col in df.columns if col.endswith("_verses")]
+    logger.debug(f"All '*_verses' columns from DataFrame: {all_verses_cols}")
+    logger.debug(f"DataFrame columns: {df.columns.tolist()}")
+
+    project_csv_cols = [col for col in all_verses_cols if col not in standard_vrs_csv_cols]
+    
+    logger.info(f"Found {len(project_csv_cols)} project columns in CSV to process for settings update.")
+
+After adding this logging, run your script again (e.g., poetry run python ebible_code/update_versifications.py --dry-run). The output from these new logger.debug lines will be crucial:
+
+std_vrs_map.keys(): Shows the names derived directly from VersificationType.
+Identified standard versification CSV columns...: Shows which of those (with _verses appended) were actually found in the DataFrame.
+All '*_verses' columns from DataFrame...: Shows all columns in the DataFrame that end with _verses.
+DataFrame columns...: Shows all columns in the DataFrame, just to be absolutely sure.
+Compare list #2 and list #3. If list #2 (standard columns found in DF) somehow includes all the _verses columns from list #3, then project_csv_cols would indeed be empty. This would imply that project-specific versification names (like "aai") are mistakenly ending up in std_vrs_map.keys() or that the if f"{name}_verses" in df.columns check is behaving unexpectedly.
+
+The most common reason for such behavior would be if Versification.get_builtin(vtype) could somehow return a Versification object whose .name attribute matches a project ID. This seems unlikely for the standard VersificationType enum values.
+
+Let's consider the generate_comparison_csv part where source_names_ordered is created:
+
+python
+    if CAN_IMPORT_VERSE_REF:
+        # The order of builtin_vrs_source_names is already based on VersificationType enum order
+        # common_vrs_ordered_names = builtin_vrs_source_names # This is already set
+        
+        # Project VRS files are those not in the builtin_vrs_source_names list
+        project_vrs_names = sorted([
+            name for name in all_loaded_versifications.keys() if name not in builtin_vrs_source_names
+        ])
+        source_names_ordered = builtin_vrs_source_names + project_vrs_names
+Here, builtin_vrs_source_names contains names like "English", "Vulgate". all_loaded_versifications.keys() contains "English", "Vulgate", ..., "aai", "aak", etc. So, project_vrs_names should correctly become ["aai", "aak", ...]. And source_names_ordered will be ["Original", "Septuagint", ..., "aai", "aak", ...]. The columns in the CSV will then be Original_verses, Septuagint_verses, ..., aai_verses, aak_verses.
+
+This part seems correct. The issue is almost certainly in how standard_vrs_csv_cols is being populated or used in update_versification_settings.
+
+The debug logs you'll get from the change above should illuminate the exact contents of these lists and help us see why the project columns are being filtered out.
+
+One small thought: Is it possible that one of your project IDs (e.g., "aai") coincidentally matches a name that Versification.get_builtin(vtype).name could produce for some VersificationType? This is highly unlikely but worth keeping in the back of your mind when looking at the debug output of std_vrs_map.keys().
+
+After you run with the added logging, please share the relevant log output. That will give us the concrete data needed to fix the filter.
+
+Rate this answer: 
+Context Sources (4)
+
+David Baines
+The output for each seems to be the same; "2025-05-06 17:26:55,267 - INFO - main - Parsing project VRS: gnwNT.vrs (for project 'gnwNT') 2025-05-06 17:26:55,267 - ERROR - main - Failed to load project VRS file gnwNT.vrs for project gnwNT: load() got an unexpected keyword argument 'name'" The <project_name>.vrs files still exist from previous executions of the code.
+
+
+Gemini
+You've found the culprit! The error message Failed to load project VRS file ...: load() got an unexpected keyword argument 'name' clearly points to an issue with how the Versification.load() method is being called for project-specific VRS files.
+
+It seems that when we integrated the code, the argument for providing a name to the Versification object if it can't be determined from the file was changed from fallback_name (which was used in the original compare_versifications.py and worked) to name. The sil-machine library's Versification.load() method evidently expects fallback_name.
+
+Let's revert that specific keyword argument back to fallback_name.
+
+Here's the diff:
+
+update_versifications.py
+-1
++1
+        logger.info(f"Parsing project VRS: {vrs_file.name} (for project '{project_name}')")
+        try:
+            # Use project_name as the Versification object's name
+            loaded_vrs = Versification.load(vrs_file, name=project_name) # Use name instead of fallback_name
+            loaded_vrs = Versification.load(vrs_file, fallback_name=project_name) # Reverted to fallback_name
+            all_loaded_versifications[project_name] = loaded_vrs
+        except Exception as e:
+            logger.error(f"Failed to load project VRS file {vrs_file.name} for project {project_name}: {e}")
+
+Explanation of Change:
+
+In the generate_comparison_csv function, within the loop that processes project-specific VRS files, the line: loaded_vrs = Versification.load(vrs_file, name=project_name) has been changed back to: loaded_vrs = Versification.load(vrs_file, fallback_name=project_name)
+This aligns the call with the expected arguments of the Versification.load() method from the sil-machine library, which should resolve the TypeError and allow the project VRS files to be loaded correctly. This, in turn, should ensure that project versifications are included in the compare_versifications.csv file and are available for the settings update phase.
+
+Rate this answer: 
+Context Sources (4)
+
+David Baines
+I'd like to get the code to output the list of scores for each versification comparison. That will help to see which are clearly one not the other and which are doubtfull. It should also help with the setting of good weights.
+
+Could we have the code output another csv file comparison.results.csv. That would have a Project column, then a column for each versification. The project name (i.e. folder name) would go in the first column, and the score for each versification would go in the other columns.
+
+We could include the weights in the filename, so that subsequent runs with different weights are in different files. I wonder whether there's a neater solution though. Perhaps vrs_comp_B{WEIGHIT_BOOK}_C{WEIGHT_CHAPTER}_V{WEIGHT_VERSE}.csv would work.
+
+
+Gemini
+Okay, that's a great idea! Outputting the detailed scores for each project against every standard versification will be very insightful for fine-tuning the weights and understanding the nuances of each comparison. Generating a separate CSV for these results, with filenames reflecting the weights used, is a solid approach.
+
+Here's how we can modify the update_versifications.py script to achieve this:
+
+Collect all scores: In the update_versification_settings function, we'll gather all calculated scores for each project into a list of dictionaries.
+Generate dynamic filename: Create a filename for the scores CSV that includes the current weight settings.
+Write scores to CSV: Add a new function or logic at the end of update_versification_settings to write this collected data to the new CSV file.
+Here's the diff with the proposed changes:
+
+update_versifications.py
+-0
++34
+    """
+    logger.info("--- Starting Settings Update Phase ---")
+
+    all_projects_scores_data = [] # To store scores for the new CSV
+
+    std_vrs_map = get_standard_versification_map()
+    if not std_vrs_map:
+        logger.error("No standard versification mapping available. Cannot proceed with settings update.")
+Unchanged lines
+    
+    logger.info(f"Found {len(project_csv_cols)} project columns in CSV to process for settings update.")
+
+    # Get the names of standard versifications to use as column headers in the scores CSV
+    standard_versification_names_for_scores_csv = sorted(list(std_vrs_map.keys()))
+
+    for project_col_name in project_csv_cols: # e.g., "aai_verses"
+        project_id = project_col_name.replace("_verses", "") # e.g., "aai"
+        logger.info(f"--- Processing project for settings update: {project_id} ---")
+Unchanged lines
+            logger.warning(f"No verse data found for project {project_id} in the DataFrame. Skipping settings update for this project.")
+            continue
+
+        current_project_scores = {"Project": project_id}
+        best_score = -1.0
+        best_std_vrs_name_key = None # This will be the key for std_vrs_map (e.g., "English")
+
+Unchanged lines
+            
+            current_score = calculate_similarity_score(project_v_data, standard_v_data)
+            logger.debug(f"Score for {project_id} vs {std_vrs_name_key}: {current_score:.4f}")
+            current_project_scores[std_vrs_name_key] = round(current_score, 4) # Store score for CSV
+
+            if current_score > best_score:
+                best_score = current_score
+                best_std_vrs_name_key = std_vrs_name_key
+        
+        # Ensure all standard versifications have an entry in the current_project_scores, even if 0 or None
+        for std_name in standard_versification_names_for_scores_csv:
+            current_project_scores.setdefault(std_name, 0.0) # Default to 0.0 if no score was calculated (e.g. no data for standard)
+        all_projects_scores_data.append(current_project_scores)
+
+        if best_std_vrs_name_key:
+            vrs_type_info = std_vrs_map[best_std_vrs_name_key]
+            logger.info(f"Best match for {project_id}: {best_std_vrs_name_key} (Type: {vrs_type_info['type'].name}, Value: {vrs_type_info['value']}) with score: {best_score:.4f}")
+Unchanged lines
+        else:
+            logger.warning(f"Could not determine a best standard versification for project {project_id}.")
+
+    # --- Write the scores to a new CSV file ---
+    if all_projects_scores_data:
+        # Format weights for filename, replacing '.' with '_' if they are floats, or just use int if they are.
+        # Assuming weights can be float, let's format them consistently.
+        # Using int() if they are whole numbers to avoid ".0"
+        wb_str = str(int(WEIGHT_BOOK)) if WEIGHT_BOOK == int(WEIGHT_BOOK) else str(WEIGHT_BOOK).replace('.', '_')
+        wc_str = str(int(WEIGHT_CHAPTER)) if WEIGHT_CHAPTER == int(WEIGHT_CHAPTER) else str(WEIGHT_CHAPTER).replace('.', '_')
+        wv_str = str(int(WEIGHT_VERSE_COUNT)) if WEIGHT_VERSE_COUNT == int(WEIGHT_VERSE_COUNT) else str(WEIGHT_VERSE_COUNT).replace('.', '_')
+
+        scores_filename = f"versification_scores_B{wb_str}_C{wc_str}_V{wv_str}.csv"
+        scores_csv_path = args.csv_file.parent / scores_filename
+
+        try:
+            scores_df = pd.DataFrame(all_projects_scores_data)
+            # Ensure consistent column order: Project, then sorted standard versification names
+            ordered_score_cols = ["Project"] + standard_versification_names_for_scores_csv
+            scores_df = scores_df[ordered_score_cols]
+            scores_df.to_csv(scores_csv_path, index=False, encoding='utf-8', float_format='%.4f')
+            logger.info(f"Successfully generated scores CSV: {scores_csv_path}")
+        except Exception as e:
+            logger.error(f"Error writing scores CSV file {scores_csv_path}: {e}")
+
+    logger.info("Settings update phase complete.")
+
+
+Key Changes:
+
+update_versification_settings Function:
+all_projects_scores_data = []: Initializes a list to hold the score data for each project.
+standard_versification_names_for_scores_csv = sorted(list(std_vrs_map.keys())): Gets a sorted list of standard versification names. This will be used to ensure consistent column ordering in the output CSV.
+Inside the project loop:
+current_project_scores = {"Project": project_id}: A dictionary is created for the current project's scores.
+current_project_scores[std_vrs_name_key] = round(current_score, 4): The calculated score for each standard versification is stored.
+After iterating through all standard versifications for a project, a loop ensures that current_project_scores has an entry for every standard versification (defaulting to 0.0 if a score wasn't explicitly calculated, e.g., if the standard versification had no data). This ensures all rows in the CSV have the same set of columns.
+all_projects_scores_data.append(current_project_scores): The completed scores dictionary for the project is added to the main list.
+Writing Scores CSV:
+At the end of update_versification_settings, after processing all projects:
+A filename is constructed: versification_scores_B{WEIGHT_BOOK}_C{WEIGHT_CHAPTER}_V{WEIGHT_VERSE_COUNT}.csv.
+The weight values are formatted to be filename-friendly (integers if they are whole numbers, otherwise replacing . with _ for floats).
+The path for this new CSV is set to be in the same directory as compare_versifications.csv (i.e., args.csv_file.parent).
+A pandas DataFrame is created from all_projects_scores_data.
+The columns of the DataFrame are reordered to have "Project" first, followed by the standard versification names in alphabetical order.
+The DataFrame is written to the new CSV file, with float scores formatted to 4 decimal places.
+To use this:
+
+When you run the script, for example: poetry run python ebible_code/update_versifications.py --dry-run
+
+If your weights are WEIGHT_BOOK = 2.0, WEIGHT_CHAPTER = 1.0, WEIGHT_VERSE_COUNT = 2.5, it will now:
+
+Generate/update EBIBLE_DATA_DIR/metadata/compare_versifications.csv.
+Perform the dry run for Settings.xml updates.
+Generate a new file: EBIBLE_DATA_DIR/metadata/versification_scores_B2_C1_V2_5.csv.
+This new CSV will look something like this:
+
+csv
+Project,English,Original,Russian Orthodox,Russian Protestant,Septuagint,Vulgate
+aai,0.8523,0.7500,0.8400,0.8523,0.7000,0.7200
+aak,0.9100,0.8000,0.9000,0.9100,0.7800,0.7900
+...
+This should give you exactly the data you need to analyze the scoring and refine your weights!
+
+Rate this answer: 
+Context Sources (4)
+
+David Baines
+This seems to be working very well.
+In the logic for comparing versifications to the standard, we are only comparing differences in the presence or absence of Books and Chapters, and the total length of each chapter. There are very small differences in the scores for each project, so the 'signal' isn't very clear. For most of the chapters the number of verses is the same across all the standard versification systems. Could we ignore all the chapters whose lengths are the same in all the versification systems, and consider only those that differ between systems. That would require an initial calculation to discard those chapters that are the same in all versification systems. Perhaps we can use that to speed up processing too, because fewer chapters would need to be considered. Hopefully this will also increase the variance in the scores, making it clearer which is the most likely candidate.
+
+
+Gemini
+You're right, focusing the comparison on the chapters where standard versification systems actually differ should indeed provide a clearer signal and highlight more meaningful distinctions. This is an excellent refinement to the heuristic!
+
+Here's how we can implement this:
+
+Identify "Invariant Chapters": Before scoring any project, we'll analyze all standard versifications to find chapters where their verse counts are identical (or where only one standard system defines the chapter, making it non-differentiating among multiple systems). These will be our "invariant chapters."
+Modify Scoring Logic: The calculate_similarity_score function will be updated.
+The Book Score will remain as is, considering the overall presence of books.
+The Chapter Score and Verse Count Score will now focus only on the "differentiating" (i.e., non-invariant) chapters that are present in the common books between the project and the standard.
+This approach should amplify the differences where they matter most for distinguishing between standard versification systems.
+
+Here are the code changes:
+
+update_versifications.py
+-24
++90
+def calculate_similarity_score(
+    project_v_data: Dict[tuple, int], 
+    standard_v_data: Dict[tuple, int],
+    invariant_chapters: Set[Tuple[str, int]]
+    ) -> float:
+    """Calculates the similarity score between a project and a standard versification."""
+    project_books = {book for book, chap in project_v_data}
+    if not project_books:
+        return 0.0
+
+    standard_books_defined = {book for book, chap in standard_v_data}
+    common_books = project_books.intersection(standard_books_defined)
+    book_score = len(common_books) / len(project_books) if project_books else 0.0
+
+    project_chapters_in_common_books = {(b, c) for (b, c), v in project_v_data.items() if b in common_books}
+    standard_chapters_defined = {(b, c) for (b, c), v in standard_v_data.items()}
+    
+    common_chapters = project_chapters_in_common_books.intersection(standard_chapters_defined)
+    chapter_score = len(common_chapters) / len(project_chapters_in_common_books) if project_chapters_in_common_books else 0.0
+
+    matching_verse_count_chapters = 0
+    chapters_for_verse_comparison = common_chapters 
+
+    for book, chap in chapters_for_verse_comparison:
+        if project_v_data.get((book, chap)) == standard_v_data.get((book, chap)):
+            matching_verse_count_chapters += 1
+    
+    verse_count_score = matching_verse_count_chapters / len(chapters_for_verse_comparison) if chapters_for_verse_comparison else 0.0
+    """Calculates the similarity score.
+    Book score is based on all books.
+    Chapter and Verse scores focus on non-invariant chapters within common books.
+    """
+    # --- Book Score (overall book presence) ---
+    project_books_overall = {book for book, chap in project_v_data}
+    if not project_books_overall:
+        return 0.0 # No books in project, no similarity
+
+    standard_books_defined_overall = {book for book, chap in standard_v_data}
+    common_books = project_books_overall.intersection(standard_books_defined_overall)
+    book_score = len(common_books) / len(project_books_overall) if project_books_overall else 0.0
+
+    # --- Filter data to focus on non-invariant chapters within common books ---
+    # Project's (book, chapter) pairs that are in common books AND are not invariant
+    project_bc_for_detailed_comparison = {
+        (b, c) for (b, c) in project_v_data.keys()
+        if b in common_books and (b, c) not in invariant_chapters
+    }
+    # Standard's (book, chapter) pairs that are in common books AND are not invariant
+    standard_bc_for_detailed_comparison = {
+        (b, c) for (b, c) in standard_v_data.keys()
+        if b in common_books and (b, c) not in invariant_chapters
+    }
+
+    # --- Chapter Score (for non-invariant chapters in common books) ---
+    # How many of the project's non-invariant chapters (in common books) are also defined in the standard's non-invariant set?
+    common_differentiating_chapters = project_bc_for_detailed_comparison.intersection(standard_bc_for_detailed_comparison)
+    
+    num_project_differentiating_chapters = len(project_bc_for_detailed_comparison)
+    chapter_score = len(common_differentiating_chapters) / num_project_differentiating_chapters \
+        if num_project_differentiating_chapters else 0.0
+
+    # --- Verse Count Score (for common differentiating chapters) ---
+    matching_verse_count_differentiating_chapters = 0
+    # We iterate over chapters that are common AND differentiating
+    for book, chap in common_differentiating_chapters:
+        if project_v_data.get((book, chap)) == standard_v_data.get((book, chap)):
+            matching_verse_count_differentiating_chapters += 1
+    
+    num_common_differentiating_chapters_for_verse_score = len(common_differentiating_chapters)
+    verse_count_score = matching_verse_count_differentiating_chapters / num_common_differentiating_chapters_for_verse_score \
+        if num_common_differentiating_chapters_for_verse_score else 0.0
+    
+    total_score = (WEIGHT_BOOK * book_score) + \
+                  (WEIGHT_CHAPTER * chapter_score) + \
+                  (WEIGHT_VERSE_COUNT * verse_count_score)
+
+    # Extended logging for debugging score components
+    # project_id_for_log = "N/A" # Placeholder, ideally pass project_id for full context
+    # standard_name_for_log = "N/A" # Placeholder, ideally pass standard_name for full context
+    # logger.debug(f"Scores for Project vs Standard:")
+    # logger.debug(f"  Common Books: {len(common_books)} / Project Books: {len(project_books_overall)}")
+    # logger.debug(f"  Book Score: {book_score:.4f}")
+    # logger.debug(f"  Project Differentiating Chapters (in common books): {num_project_differentiating_chapters}")
+    # logger.debug(f"  Standard Differentiating Chapters (in common books): {len(standard_bc_for_detailed_comparison)}")
+    # logger.debug(f"  Common Differentiating Chapters: {len(common_differentiating_chapters)}")
+    # logger.debug(f"  Chapter Score (Differentiating): {chapter_score:.4f}")
+    # logger.debug(f"  Matching Verse Count (Differentiating): {matching_verse_count_differentiating_chapters}")
+    # logger.debug(f"  Verse Count Score (Differentiating): {verse_count_score:.4f}")
+    # logger.debug(f"  Total Weighted Score: {total_score:.4f}")
+
+    return total_score
+
+def update_settings_xml(project_path: Path, new_versification_value: int):
+Unchanged lines
+        logger.error("No standard versification mapping available. Cannot proceed with settings update.")
+        return
+
+    # --- Identify Invariant Chapters (chapters with same verse count across all defining standard versifications) ---
+    standard_vrs_data_map = {}
+    for std_name_key in std_vrs_map.keys():
+        std_col_name = f"{std_name_key}_verses"
+        if std_col_name in df.columns:
+            standard_vrs_data_map[std_name_key] = get_data_from_df_for_scoring(df, std_col_name)
+        else:
+            # This case should ideally not happen if df is generated correctly with all std_vrs_map keys
+            logger.warning(f"Standard versification column {std_col_name} (for {std_name_key}) not found in DataFrame. It will be excluded from invariant chapter check.")
+
+    all_chapters_in_standards = set()
+    for std_data in standard_vrs_data_map.values():
+        all_chapters_in_standards.update(std_data.keys())
+
+    invariant_chapters = set()
+    if not all_chapters_in_standards:
+        logger.warning("No chapters found in any standard versifications. Cannot identify invariant chapters.")
+    else:
+        for book_chap_tuple in all_chapters_in_standards:
+            defined_verse_counts_for_chapter = []
+            for std_data in standard_vrs_data_map.values():
+                if book_chap_tuple in std_data: # Check if the standard versification defines this chapter
+                    defined_verse_counts_for_chapter.append(std_data[book_chap_tuple])
+            
+            unique_defined_counts = set(defined_verse_counts_for_chapter)
+            if len(unique_defined_counts) <= 1: # 0 or 1 unique verse count means it's invariant
+                invariant_chapters.add(book_chap_tuple)
+        logger.info(f"Identified {len(invariant_chapters)} invariant chapters out of {len(all_chapters_in_standards)} total unique chapters in standards.")
+        # logger.debug(f"Sample of invariant chapters: {sorted(list(invariant_chapters))[:20]}")
+
+    # Standard versification columns in the CSV (e.g., "English_verses")
+    # These names come from Versification.get_builtin(vtype).name
+    standard_vrs_csv_cols = [f"{name}_verses" for name in std_vrs_map.keys() if f"{name}_verses" in df.columns]
+Unchanged lines
+                logger.debug(f"No data for standard versification {std_vrs_name_key} to compare with {project_id}.")
+                continue
+            
+            current_score = calculate_similarity_score(project_v_data, standard_v_data)
+            current_score = calculate_similarity_score(project_v_data, standard_v_data, invariant_chapters)
+            logger.debug(f"Score for {project_id} vs {std_vrs_name_key}: {current_score:.4f}")
+            current_project_scores[std_vrs_name_key] = round(current_score, 4) # Store score for CSV
+
+
+Summary of Changes:
+
+update_versification_settings():
+
+Added a new section to identify invariant_chapters.
+It first loads verse data for all standard versifications.
+Then, it iterates through all unique (Book, Chapter) pairs found across these standards.
+For each pair, it collects the verse counts from all standard versifications that define that chapter.
+If there's 0 or 1 unique verse count among these definitions, the chapter is marked as invariant.
+The invariant_chapters set is then passed to calculate_similarity_score.
+calculate_similarity_score():
+
+Now accepts invariant_chapters: Set[Tuple[str, int]] as a new parameter.
+Book Score: Calculated as before, based on the overall intersection of books between the project and the standard.
+Focused Comparison Data:
+project_bc_for_detailed_comparison: Contains (Book, Chapter) pairs from the project that are within common_books AND are not in invariant_chapters.
+standard_bc_for_detailed_comparison: Similarly, (Book, Chapter) pairs from the standard that are within common_books AND are not in invariant_chapters.
+Chapter Score:
+Numerator: Intersection of project_bc_for_detailed_comparison and standard_bc_for_detailed_comparison (i.e., common differentiating chapters).
+Denominator: Total number of chapters in project_bc_for_detailed_comparison.
+Verse Count Score:
+Calculated based on the common_differentiating_chapters.
+Numerator: Number of these common differentiating chapters where verse counts match.
+Denominator: Total number of common_differentiating_chapters.
+The final weighted score is computed using these refined component scores.
+Impact and Considerations:
+
+Increased Variance: This change should indeed increase the variance in scores, as you hypothesized. Similarities in invariant chapters will no longer dilute the scores, allowing the differences in variant chapters to have a more pronounced effect.
+Weight Re-evaluation: The current weights (WEIGHT_BOOK = 0.0, WEIGHT_CHAPTER = 0.0, WEIGHT_VERSE_COUNT = 1.0) will now make the WEIGHT_VERSE_COUNT (and WEIGHT_CHAPTER if it were non-zero) apply to a more targeted and potentially smaller set of chapters. You'll likely want to experiment with these weights again (e.g., 2.0, 1.0, 2.5 or 1.0, 1.0, 1.0) to see what yields the most intuitive results with this new scoring logic.
+Speed: The initial calculation to find invariant chapters adds a bit of overhead, but the subsequent scoring for each project might be slightly faster if many chapters are invariant, as the dictionaries being intersected for chapter and verse scores will be smaller. The overall impact on speed should be minimal or potentially slightly positive.
+Logging: I've added some commented-out logger.debug lines within calculate_similarity_score and for invariant chapters. You can uncomment these if you want very detailed output during testing to understand how the scores are being derived with the new logic.
+This refined approach should make the versification comparison more sensitive to the actual distinguishing features between the standard systems.
+
+Rate this answer: 
+Context Sources (4)
+
+David Baines
+I got this error: C:\ebible_code>poetry run python ebible_code/update_versifications.py File "C:\ebible_code\ebible_code\update_versifications.py", line 144 invariant_chapters: Set[Tuple[str, int]]
+
+
+Gemini
+It looks like there's a small syntax error in the function definition for calculate_similarity_score. You're missing a comma between the standard_v_data parameter and the invariant_chapters parameter.
+
+Here's the corrected line:
+
+update_versifications.py
+-1
++1
+
+def calculate_similarity_score(
+    project_v_data: Dict[tuple, int], 
+    standard_v_data: Dict[tuple, int]
+    standard_v_data: Dict[tuple, int],
+    invariant_chapters: Set[Tuple[str, int]]
+    ) -> float:
+    """Calculates the similarity score.
+
+Adding that comma should resolve the SyntaxError you're encountering!
+
+Rate this answer: 
+Context Sources (4)

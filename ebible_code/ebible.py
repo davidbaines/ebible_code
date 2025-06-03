@@ -467,8 +467,7 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
             needs_download = True
         elif is_date_older_than(row['status_download_date'], max_age_days):
             needs_download = True
-        elif pd.isna(row['status_download_path']) or not Path(row['status_download_path']).exists():
-            # Check if file exists only if date is recent
+        elif pd.isna(row['status_download_path']) or not Path(row['status_download_path']).is_file():
             needs_download = True
 
         df.loc[index, 'action_needed_download'] = needs_download
@@ -481,8 +480,7 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
             needs_unzip = True
         elif is_date_older_than(row['status_unzip_date'], max_age_days):
             needs_unzip = True
-        elif pd.isna(row['status_unzip_path']) or not Path(row['status_unzip_path']).exists():
-            # Check if dir exists only if date is recent
+        elif pd.isna(row['status_unzip_path']) or not Path(row['status_unzip_path']).is_dir():
             needs_unzip = True
 
         df.loc[index, 'action_needed_unzip'] = needs_unzip
@@ -501,13 +499,13 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
 
         # --- Text Extraction Check ---
         needs_extract = False
-        if needs_unzip: # If re-unzipping, must re-extract
+        if needs_unzip: # If unzipping, must extract
             needs_extract = True
-        elif force_download: # Force implies re-extract too
+        elif force_download: # Force download implies extract too.
             needs_extract = True
-        elif is_date_older_than(row['status_extract_date'], max_age_days): # Using the new combined date
+        elif is_date_older_than(row['status_extract_date'], max_age_days):
             needs_extract = True
-        elif pd.isna(row['status_extract_path']) or not Path(row['status_extract_path']).exists():
+        elif pd.isna(row['status_extract_path']) or not Path(row['status_extract_path']).is_file():
             # Check if final extracted file exists
             needs_extract = True
         

@@ -1241,4 +1241,238 @@ With this change, the "Starting text extraction..." and "Successfully extracted.
 
 Rate this answer: 
 Context Sources (17)
-5 context items
+
+David Baines
+This looks like it's working great. The files are being extracted now.
+
+I'd like to discuss ideas with you about the next steps for this. I have a script corpus_to_parquet.py that prepares a parquet file ready for uploading to huggingface as a dataset.
+
+On the one hand I would like to get these updated files on HF asap, but I know that a few of them will need further improvements.
+
+One set of improvements is running an external script called wb_normalize.py over the corpus files. This script will look for some common character encoding errors and correct them. I think I'll need a way to track changes to the corpus files that occur like that. Whether they are manually updated with corrections, or updated by a script. Now these files will be part of another repo called simply ebible. So the main tracking of details can happen there. However it would be good for this script to create a hash (using xxhash) of the extracted files and save that in the ebible_status.csv along with the data of the hash. It could include another column we can call wildebeest_hash along with wildebeest_hash_date. These would allow us to list which files were changed by the wildebeest script and which are left unchanged.
+
+I guess this works for track that one specific known reason for changes. I'm not sure that it would work well for ad-hoc manual edits though.
+
+Also, I have seen how much easier it is to use the script when tasks such as extracting are intergrated in. So maybe it would be a good idea to incorporate the wildebeest code so that it can be run and tracked through the ebible.py script.
+
+Do you have advice about these ideas and issues?
+
+
+Gemini
+That's great news that the extraction is working well! It sounds like you've made significant progress in streamlining the initial data pipeline.
+
+Moving on to cleaning and tracking changes is a very logical next step, especially before pushing to Hugging Face. Let's discuss your ideas about wb_normalize.py and hashing.
+
+Hashing for Change Tracking (wildebeest_hash)
+Adding a hash (like using xxhash) of the extracted corpus file to ebible_status.csv is an excellent idea for tracking whether a file has changed since the hash was last recorded.
+
+Advice on the Hashing Idea:
+
+Feasibility: This is definitely feasible and relatively straightforward to implement. xxhash is a good choice for speed and collision resistance for this purpose.
+Purpose: The wildebeest_hash and wildebeest_hash_date columns would serve as a fingerprint of the corpus file (<translationId>.txt) at a specific point in time.
+What it Tracks: As you noted, the hash tracks any change to the file's content. It won't tell you if the change was made by wb_normalize.py, a manual edit, or some other process. It only tells you that the file's content is different from when the hash was last calculated.
+Usefulness: Despite not knowing the cause of the change, this is still very useful!
+It lets you quickly identify which extracted files have been modified after the initial extraction pipeline run.
+If you integrate wb_normalize.py later, you can calculate the hash after normalization. This hash then represents the "cleaned" state of the file. Any subsequent change (manual or otherwise) would be detected by comparing the current hash to this wildebeest_hash.
+It helps ensure reproducibility up to the point the hash was calculated. If the hash matches, you know the file content is the same as it was on wildebeest_hash_date.
+Manual Edits: You're right, manual edits are the trickiest part. If someone manually edits a file in the corpus/ directory after ebible.py has run and calculated the hash, the hash will no longer match on a subsequent run (if you add logic to check/recalculate). ebible.py wouldn't know why it changed.
+Best Practice for Manual Edits: Ideally, manual edits to the corpus files should be managed in the target repository (ebible repo) using version control (Git). This provides a clear history of who made what change and when. The ebible_data_pipeline repo's role would be to generate the initial or automatically updated versions of these files. If manual edits are needed, they would happen in the ebible repo, and perhaps the ebible_data_pipeline would need a way to not overwrite manually edited files, or to merge changes (which is complex). For now, letting the hash detect the change is a good first step.
+Code Suggestions for Hashing:
+
+Add Columns: Modify STATUS_COLUMNS in ebible.py to include the new columns.
+
+python
+STATUS_COLUMNS = [
+    "status_download_path", "status_download_date", "status_unzip_path",
+    "status_unzip_date", "status_settings_xml_date", # Settings.xml creation date
+    "status_extract_path", "status_extract_date", # For internally extracted and finalized text
+    "status_last_error", "status_inferred_versification",
+    "wildebeest_hash", # New column for the hash
+    "wildebeest_hash_date" # New column for the hash date
+]
+# ALL_STATUS_COLUMNS will be updated automatically
+Hashing Function: Add a helper function to calculate the hash. You'll need to install xxhash (pip install xxhash or add to your poetry dependencies).
+
+python
+import xxhash # Add this import at the top
+
+def _calculate_file_hash(file_path: Path) -> Optional[str]:
+    """Calculates the xxhash of a file."""
+    if not file_path.is_file():
+        return None
+    try:
+        h = xxhash.xxh64()
+        with open(file_path, "rb") as f:
+            # Read in chunks to handle large files efficiently
+            while chunk := f.read(8192):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception as e:
+        logging.error(f"Error calculating hash for {file_path}: {e}")
+        return None
+Integrate Hash Calculation: Call this function after successful extraction in extract_and_finalize_texts.
+
+ebible.py
+        df.loc[index, 'status_extract_path'] = str(output_file_path.resolve())
+        df.loc[index, 'status_extract_date'] = TODAY_STR
+        df.loc[index, 'status_last_error'] = np.nan # Clear error on success
+ebible.py
+       # Calculate and store the hash of the newly extracted file
+plaintext
+       file_hash = _calculate_file_hash(output_file_path)
+ebible.py
+       df.loc[index, 'wildebeest_hash'] = file_hash
+plaintext
+       df.loc[index, 'wildebeest_hash_date'] = TODAY_STR
+plaintext
+       extracted_count +=1
+   else:
+       df.loc[index, 'status_extract_path'] = np.nan
+plaintext
+
+Add Action Needed for Hashing: Modify determine_actions to flag rows where the hash needs recalculating (e.g., if the file was just extracted, or if the hash is missing/old).
+
+ebible.py
+The code change produced by Gemini could not be fully parsed. Can't automatically accept changes.
+df['action_needed_unzip'] = False
+df['action_needed_licence'] = False
+df['action_needed_extract'] = False # New action for internal extraction
+df['action_needed_hash'] = False # New action for recalculating hash
+
+for index, row in df.iterrows(): # --- Download Check --- @@ -451,6 +452,16 @@
+
+plaintext
+df.loc[index, 'action_needed_extract'] = needs_extract
+plaintext
+   # --- Hash Calculation Check ---
+plaintext
+   needs_hash = False
+plaintext
+   # If extracted or re-extracted, recalculate hash
+plaintext
+   if needs_extract:
+plaintext
+        needs_hash = True
+plaintext
+   # Or if hash is missing or old (optional, depends on how often you want to re-hash)
+plaintext
+   # elif is_date_older_than(row['wildebeest_hash_date'], max_age_days):
+plaintext
+   #      needs_hash = True
+plaintext
+   # elif pd.isna(row['wildebeest_hash']):
+plaintext
+   #      needs_hash = True
+   df.loc[index, 'action_needed_hash'] = needs_hash
+return df
+
+plaintext
+*Note:* I've added the `action_needed_hash` but initially only set it to `True` if `needs_extract` is true. You could add logic to re-hash based on date or missing hash if you want to periodically verify files even if they weren't re-extracted. For now, tying it to extraction is simple and effective.
+
+Implement Hash Calculation Step: Add a function to perform the hashing for rows flagged with action_needed_hash.
+
+python
+# Add this function after extract_and_finalize_texts
+def calculate_hashes(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculates hashes for files marked with action_needed_hash."""
+    translations_to_hash = df[df['action_needed_hash']]
+    count = len(translations_to_hash)
+    if count == 0:
+        logging.info("No files require hash calculation.")
+        return df
+
+    logging.info(f"Attempting to calculate hash for {count} files...")
+
+    hashed_count = 0
+    for index, row in tqdm(translations_to_hash.iterrows(), total=count, desc="Calculating Hashes"):
+        translation_id = row['translationId']
+        extract_path_str = row['status_extract_path']
+
+        if pd.isna(extract_path_str) or not Path(extract_path_str).is_file():
+            logging.warning(f"Skipping hash for {translation_id}: No valid extract path found or file missing.")
+            df.loc[index, 'status_last_error'] = "Hash skipped: Missing extract file"
+            continue
+
+        extract_file_path = Path(extract_path_str)
+        file_hash = _calculate_file_hash(extract_file_path)
+
+        if file_hash:
+            df.loc[index, 'wildebeest_hash'] = file_hash
+            df.loc[index, 'wildebeest_hash_date'] = TODAY_STR
+            # Keep previous error if it wasn't related to hashing
+            if "Hash skipped" in str(df.loc[index, 'status_last_error']):
+                 df.loc[index, 'status_last_error'] = np.nan
+            hashed_count += 1
+        else:
+            df.loc[index, 'wildebeest_hash'] = np.nan
+            df.loc[index, 'wildebeest_hash_date'] = np.nan
+            df.loc[index, 'status_last_error'] = f"Hash calculation failed: {_calculate_file_hash(extract_file_path)}" # Log the error from the hash function
+
+    logging.info(f"Finished hash calculation. Successfully hashed {hashed_count}/{count} files.")
+    return df
+Call Hashing Step in Main: Add a call to calculate_hashes in the main function after extraction.
+
+ebible.py
+The code change produced by Gemini could not be fully parsed. Can't automatically accept changes.
+    private_corpus_folder
+)
+
+--- Calculate Hashes ---
+actions_df = calculate_hashes(
+
+plaintext
+   actions_df
+)
+
+--- Update Main Status DataFrame and Save ---
+Use update() which aligns on index (translationId if set, otherwise row number)
+Ensure index is set correctly if needed, or update based on 'translationId' column
+plaintext
+
+This implementation adds the hashing capability. The wildebeest_hash will store the hash of the file immediately after it was extracted (or re-extracted). If you later run wb_normalize.py manually on a file, the next time you run ebible.py (and assuming you add logic to check/recalculate hashes based on file modification time or missing hash), the hash calculation step would detect the change and update the hash. This would signal that the file is no longer in the state it was right after extraction by this script.
+
+Integrating wb_normalize.py
+Integrating the normalization step is a logical next step for a fully automated pipeline.
+
+Advice on Integration:
+
+Benefits:
+Automation: The cleaning step becomes part of the standard pipeline run.
+Consistency: Ensures normalization is applied consistently to all files processed by the script.
+Status Tracking: You can add a status_normalize_date column to track when normalization was last applied by the script.
+Order of Operations: You can control that normalization happens after extraction and before the final hash calculation.
+Prerequisites: You need the core logic of wb_normalize.py. This could mean:
+Copying the relevant function(s) into ebible.py (similar to what was done with extract_project).
+Or, if wb_normalize.py is structured as a module or function that can be imported, you could import and call it directly.
+Implementation Idea:
+Add a new action action_needed_normalize in determine_actions. This would be true if action_needed_extract is true, or if status_normalize_date is old/missing.
+Create a new function normalize_text_file(input_file_path: Path, output_file_path: Path) -> bool that encapsulates the wb_normalize.py logic. It would read the input, apply normalization, and write to the output.
+Modify extract_and_finalize_texts or add a new step in main:
+Option A (Simpler): extract_project writes to the final path (<translationId>.txt). Then, a new normalize_and_finalize_texts function (or a modification of extract_and_finalize_texts) reads this file, applies normalization, and overwrites the same file. The hash would then be calculated on this normalized file.
+Option B (More complex, potentially safer): extract_project writes to a temporary or "raw_corpus" location. normalize_text_file reads from "raw_corpus" and writes to the final corpus/ location. The hash is calculated on the file in the final corpus/ location.
+Update ebible_status.csv with status_normalize_date.
+Order of Operations in main (if integrating normalization):
+
+Initialize/Load Status
+Scan Folders
+Ensure Extract Paths
+Filter Translations
+Determine Actions (including action_needed_download, action_needed_unzip, action_needed_licence, action_needed_extract, action_needed_normalize, action_needed_hash)
+Download
+Unzip/Process (Rename USFM, VRS, Settings, Licence)
+Check Licences (for non-unzipped)
+Extract Text (extract_and_finalize_texts) - writes to final path
+Normalize Text (New function, e.g., normalize_extracted_texts) - reads from final path, overwrites final path
+Calculate Hashes (calculate_hashes) - calculates hash of the normalized file
+Update/Save Status
+This integrated approach provides the most control and best status tracking within ebible.py.
+
+Summary of Advice:
+Implement Hashing Now: Adding the wildebeest_hash and wildebeest_hash_date columns and calculating the hash after extraction is a valuable first step for tracking changes. The code suggestions above provide a way to do this.
+Plan Normalization Integration: Integrating wb_normalize.py is a good long-term goal for a fully automated pipeline. You'll need access to the normalization logic and can follow the pattern used for integrating extraction (new action, new function, update status).
+Manual Edits: For manual edits, rely on version control in the target repository (ebible repo). This pipeline is best suited for generating data automatically. If manual edits must happen in the output folders, the hash will detect them, but managing them further within this script is complex.
+Let's start with the hashing changes. The provided diffs and function should get you most of the way there. Remember to install xxhash.
+
+Rate this answer: 
+Context Sources (12)
+6 context items

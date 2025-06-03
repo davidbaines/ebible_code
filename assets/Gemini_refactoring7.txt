@@ -1,0 +1,1392 @@
+
+David Baines
+The ebible.py script can be run to perform several actions. First it downloads translations.csv from ebible.org. From that file it determines a list of zipped scripture project folders to download.
+Then it unzips those to a private_corpus or corpus folder depending upon the value in the "Redistributable" field within translation.csv. Then it should update-settings - adding a Settings.xml file to each of the project folders. These are necessary for the next step. That is to use the commands that are printed to extract the projects into a one-verse-per-line text file format. These aligned files are ideal for machine learning tasks. Then the code is run again with the --rename-extracted flag to correct the names of the extract files so that they match the template <translationId>.txt Finally the code can be run with --calculate-hashes to check whether any of the extracted text files have been changed since the last calculation.
+
+This is cumbersome, and since the code isn't something I run often I'm apt to forget this order of events. Also it's hard to know where I am in the process.
+
+What suggestions are there for improving these aspect of the code and process?
+
+
+Gemini
+You've hit on a common challenge with multi-stage processing scripts: remembering the correct sequence of operations and understanding the current progress can indeed be cumbersome. The ebible.py script, while powerful, could benefit from a more streamlined workflow.
+
+Here are my suggestions to improve these aspects, focusing on making the process more automated and intuitive:
+
+1. Implement a "Pipeline Mode"
+The core idea is to introduce a mode (either as the default behavior or via a new flag like --run-pipeline) where the script attempts to take each selected translation through all necessary stages automatically, from download to hash calculation.
+
+How it helps:
+Order of Events: You wouldn't need to remember the sequence of flags. The script would manage the progression.
+Knowing Where You Are: The script would use the status file to determine what's already done for each translation and what's next, making its actions more predictable.
+This pipeline would intelligently:
+
+Download and unzip new or outdated translations.
+Update Settings.xml files.
+Crucially, for the manual SILNLP step:
+Print the necessary SILNLP extraction commands.
+Record that it has prompted for SILNLP.
+Save the current progress to ebible_status.csv.
+Instruct you to run the SILNLP commands and then simply re-run ebible.py with the same pipeline command.
+Upon re-running, the script would detect that SILNLP was prompted. It would then proceed to:
+Scan for newly extracted files (the scan_and_update_status function would help here).
+Rename the extracted files.
+Calculate hashes.
+2. Enhance Status Tracking in ebible_status.csv
+To support the pipeline mode, the ebible_status.csv file needs to track more granular progress. I suggest adding a couple of new columns to the STATUS_COLUMNS list.
+
+New Columns:
+status_settings_xml_date: Records when Settings.xml was last successfully generated or updated for a project.
+status_silnlp_prompted_date: Records when the script last printed SILNLP commands for a project and prompted you to run them.
+This allows the script to make better decisions. For example, it knows not to prompt for SILNLP if settings haven't been updated, and it knows to look for extracted files to rename if SILNLP has been prompted.
+
+ebible.py
+-0
++2
+3. Refactor main() for Pipeline Orchestration
+The main() function would be restructured to manage this pipeline. Instead of separate blocks that log_and_exit for modes like --update-settings, these functions would become steps in the main flow when pipeline mode is active.
+
+Conceptual Outline of main() in Pipeline Mode:
+
+python
+# Inside main()
+
+# Determine if running in pipeline mode (e.g., default or specific flag)
+is_pipeline_mode = not (args.update_settings or args.rename_extracted or args.calculate_hashes) # Example logic
+
+if is_pipeline_mode:
+    # 1. Initial load, scan existing files, filter translations
+    status_df = initialize_or_load_status(status_path, translations_csv)
+    status_df = scan_and_update_status(status_df, ...) # Crucial for detecting prior manual steps
+    filtered_df = filter_translations(status_df, ...)
+    
+    if filtered_df.empty:
+        logging.info("No translations match filters for pipeline processing.")
+        log_and_exit(LOGFILE_PATH)
+
+    # 2. Determine all needed actions based on enhanced status
+    #    (download, unzip, licence, settings, silnlp_prompt, rename, hash)
+    #    This might involve expanding `determine_actions` or a new function.
+    actions_df = determine_all_pipeline_actions(filtered_df, max_age_days, args.force_download, TODAY_STR)
+    
+    # 3. Execute Download, Unzip, Licence (if needed)
+    if actions_df["action_needed_download"].any():
+        actions_df = download_required_files(actions_df, ...)
+        status_df.update(actions_df) # Update main status_df
+    if args.download_only:
+        # ... save and exit ...
+
+    if actions_df["action_needed_unzip"].any():
+        actions_df = unzip_and_process_files(actions_df, ...) # Includes initial licence
+        status_df.update(actions_df)
+    
+    # 4. Execute Update Settings (if needed)
+    #    Identify rows in actions_df where 'action_needed_update_settings' is true
+    #    Call a refactored update_settings function for these rows.
+    #    Update 'status_settings_xml_date' and 'status_inferred_versification'.
+    #    Example:
+    #    to_update_settings_df = actions_df[actions_df["action_needed_update_settings"]]
+    #    if not to_update_settings_df.empty():
+    #        status_df = run_settings_update_logic(status_df, to_update_settings_df, ...)
+    #        logging.info("Settings files updated.")
+
+    # 5. Handle SILNLP Extraction Prompting
+    #    Identify rows ready for SILNLP (e.g., settings updated, not yet prompted or prompt is old)
+    #    to_prompt_silnlp_df = actions_df[actions_df["action_needed_silnlp_prompt"]]
+    #    if not to_prompt_silnlp_df.empty():
+    #        print_silnlp_commands_for_df(to_prompt_silnlp_df, ...) # May need a targeted version
+    #        # Update 'status_silnlp_prompted_date' for these rows in status_df
+    #        status_df = mark_silnlp_prompted(status_df, to_prompt_silnlp_df, TODAY_STR)
+    #        status_df.to_csv(status_path, index=False)
+    #        logging.info("SILNLP commands printed. Please run them, then re-run this script to continue.")
+    #        log_and_exit(LOGFILE_PATH) # Important: stop and wait for manual step
+
+    # 6. Execute Rename Extracted Files (if SILNLP was likely run)
+    #    The existing rename_extracted_files function scans folders, which is good.
+    #    It should be called if there's a chance SILNLP output exists.
+    #    Its internal logic already updates status_df.
+    #    if actions_df["action_needed_rename"].any(): # Or just run it if past SILNLP prompt stage
+    #        status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+    #        logging.info("Extracted files renamed.")
+
+    # 7. Execute Calculate Hashes (if files are renamed)
+    #    if actions_df["action_needed_hash"].any(): # Or just run it if past rename stage
+    #        status_df = run_calculate_hashes_mode(status_df, corpus_folder, private_corpus_folder, TODAY_STR)
+    #        logging.info("Hashes calculated.")
+
+    # 8. Final Save and Exit
+    status_df.to_csv(status_path, index=False)
+    logging.info("Pipeline processing complete for this run.")
+    log_and_exit(LOGFILE_PATH)
+
+else:
+    # Handle existing specific mode flags (--update-settings, --rename-extracted, --calculate-hashes)
+    # These would run *only* that specific step, as they do now.
+    if args.update_settings:
+        # ... current logic ...
+    elif args.rename_extracted:
+        # ... current logic ...
+    elif args.calculate_hashes:
+        # ... current logic ...
+
+# --- End of main() conceptual outline ---
+4. Modify determine_actions() (or a new helper function)
+This function (or a new one dedicated to the pipeline) would be expanded to check the new status columns and max_age_days to decide all actions:
+
+action_needed_download
+action_needed_unzip
+action_needed_licence
+action_needed_update_settings: True if status_unzip_date is recent but status_settings_xml_date is old/missing.
+action_needed_silnlp_prompt: True if status_settings_xml_date is recent but status_silnlp_prompted_date is old/missing.
+action_needed_rename: True if status_extract_date (updated by scan_and_update_status after SILNLP runs) is present/recent, but status_extract_renamed_date is old/missing.
+action_needed_calculate_hash: True if status_extract_renamed_date is present/recent, but the hash column for TODAY_STR is missing.
+5. Adapt Existing Action Functions
+Functions like update_all_settings, rename_extracted_files, and run_calculate_hashes_mode are largely suitable.
+
+update_all_settings: Might be refactored to operate on a specific subset of translations passed to it if called within the pipeline, rather than always scanning all project folders. Its core logic of writing Settings.xml and updating status_inferred_versification is what's needed. It should also update the new status_settings_xml_date.
+rename_extracted_files and run_calculate_hashes_mode: These already scan folders or the whole status_df and update it, which fits well into a pipeline that might be re-run.
+Benefits of These Changes:
+Simplified Workflow: For most uses, you'd run the script once (or twice if SILNLP is involved) without needing to specify different flags for each stage.
+Improved State Management: The script becomes more aware of its progress for each translation.
+Clearer User Guidance: The script explicitly tells you when manual intervention (SILNLP) is needed and what to do next.
+Reduced Cognitive Load: Less to remember about the operational sequence.
+Retaining Specific Mode Flags:
+The existing flags (--update-settings, --rename-extracted, --calculate-hashes, --force_download) can and should be kept. They provide valuable targeted functionality if you only want to perform a specific step on all relevant translations, outside of the main pipeline flow. The pipeline logic would typically be invoked if none of these specific mode flags are active.
+
+By implementing these suggestions, the ebible.py script can become significantly more user-friendly and robust for managing the entire data processing workflow.
+
+Rate this answer: 
+Context Sources (1)
+
+David Baines
+In 4. Would it be a good idea to simply check the extracted file's name to determine whether it needs to be renamed or not. Since the renamed version is always <translationId>.txt we can be sure whether or not that exists in the corpus or private_corpus folders. If it doesn't exist but <isocode>-<translationId>.txt exists then (I think) that would indicate that the file needs to be renamed.
+
+
+Gemini
+You've hit on the precise logic that the rename_extracted_files function uses internally!
+
+To answer your question directly: Yes, checking if <translationId>.txt exists, and if not, checking for <isocode>-<translationId>.txt to determine if a rename is needed, is indeed a very good and accurate way to assess the state of an individual extracted file.
+
+Here's how this aligns with the current script and the proposed pipeline improvements:
+
+rename_extracted_files Function:
+
+This function already implements the exact logic you described. When it scans the corpus and private_corpus folders, for each .txt file it finds:
+It first tries to parse it as <isocode>-<translationId>.txt.
+If it matches this pattern, it then checks if the corresponding <translationId>.txt already exists.
+If <translationId>.txt does not exist, it renames <isocode>-<translationId>.txt to <translationId>.txt.
+If <translationId>.txt does exist (which the pre-flight check in that function aims to prevent as an initial conflicting state), it logs this and updates the status to reflect that the correctly named file is present.
+If the file it finds is already named <translationId>.txt, it confirms this and updates the status accordingly (e.g., setting status_extract_renamed_date).
+So, the core file-level check you're suggesting is already the heart of the rename_extracted_files operation.
+Pipeline Mode (determine_actions):
+
+In the proposed pipeline, the determine_actions function (or a similar helper) wouldn't necessarily re-implement this specific file-level check for every translation. Instead, it would decide whether to trigger the entire rename_extracted_files process based on higher-level status indicators.
+The condition for action_needed_rename would typically be:
+Has the Settings.xml file been generated recently (status_settings_xml_date)?
+Have the SILNLP extraction commands been prompted recently (status_silnlp_prompted_date)? This implies that SILNLP output might now exist.
+Is the status_extract_renamed_date missing or older than a relevant threshold (e.g., older than status_silnlp_prompted_date or max_age_days)?
+If these conditions are met, the pipeline would then execute rename_extracted_files. This function would then perform its thorough scan of the corpus folders, applying the specific <isocode>-<translationId>.txt vs. <translationId>.txt check to every file it encounters.
+Role of scan_and_update_status:
+
+The scan_and_update_status function plays a part. When it scans for existing extracted files, it currently looks for <isocode>-<translationId>.txt to populate status_extract_date and status_extract_original_filename.
+If it finds such a file and status_extract_renamed_date is still empty, this is a strong signal that renaming is needed. The pipeline's determine_actions could use this information.
+A potential enhancement (as discussed in my previous, more detailed suggestions) would be for scan_and_update_status to also look for <translationId>.txt. If found, it could directly update status_extract_renamed_date and set status_extract_path to this final renamed file. This would make the status more accurate even if the --rename-extracted mode wasn't the very last operation.
+In summary:
+
+Your intuition about how to check if a file needs renaming is spot on. That logic is already central to the rename_extracted_files function. The pipeline improvements focus on automating the sequence of operations, including calling rename_extracted_files at the appropriate time, rather than changing its core file-checking mechanism. The pipeline relies on rename_extracted_files to be robust and correctly handle the various file states it might encounter.
+
+No changes to the file-checking logic within rename_extracted_files itself are needed based on your suggestion, as it's already doing that. The key is ensuring the pipeline calls this function when there's a reasonable expectation that SILNLP has produced output that might need renaming.
+
+Rate this answer: 
+Context Sources (1)
+
+David Baines
+Could you update the code for these changes - if they can be accomodated in the context window.
+
+
+Gemini
+Okay, this is an excellent set of improvements to make the ebible.py script more robust and user-friendly! Implementing a full pipeline mode with enhanced status tracking will significantly streamline the workflow.
+
+Given the scope, I'll provide the core changes to introduce the pipeline structure, the new status columns, and the necessary modifications to key functions. This will be a substantial update.
+
+Here are the suggested code modifications:
+
+ebible.py
+-137
++192
+    "status_extract_path",
+    "status_extract_date",
+    "status_extract_renamed_date",
+    "status_extract_original_filename", # New column for original name
+    "status_settings_xml_date", # New: Tracks Settings.xml generation
+    "status_silnlp_prompted_date", # New: Tracks when SILNLP commands were prompted
+    "status_extract_original_filename",
+    "status_settings_xml_date", # Tracks Settings.xml generation
+    "status_silnlp_prompted_date", # Tracks when SILNLP commands were prompted
+    "status_last_error",
+    "status_inferred_versification",  # Added new column
+]
+            df.loc[
+                index, "status_inferred_versification"
+            ] = vrs_num  # Store the inferred versification number
+            df.loc[
+                index, "status_settings_xml_date"
+            ] = TODAY_STR # Settings.xml was generated today
+
+
+            # Extract Licence Details (only if needed or forced)
+            if row["action_needed_licence"]:
+                        status_df.loc[
+                            status_df["translationId"] == translation_id,
+                            "status_inferred_versification",
+                        ] = vrs_num
+                        ] = vrs_num # type: ignore
+                        status_df.loc[
+                            status_df["translationId"] == translation_id,
+                            "status_settings_xml_date",
+                        ] = TODAY_STR # type: ignore
+
+                        # Add data to report
+                        report_entry = {
+                        report_entry: Dict[str, Optional[str]] = {
+                            "translationId": translation_id,
+                            "settings_path": str(settings_path.resolve()),
+                            **old_vals,
+                        status_df.loc[
+                            status_df["translationId"] == translation_id,
+                            "status_last_error",
+                        ] = "Settings update failed"
+                        ] = "Settings update failed" # type: ignore
+                else:
+                    logging.warning(
+                        f"Skipping {project_dir}: No entry found in status file for translationId '{translation_id}'."
+        f"--- Settings update complete. Processed {processed_folders} potential project folders. ---"
+    )
+    return status_df
+
+
+def determine_pipeline_actions(
+    df: pd.DataFrame, max_age_days: int, force_download: bool, today_str: str
+) -> pd.DataFrame:
+    """Determines all necessary actions for the pipeline based on current status."""
+    df = determine_actions(df, max_age_days, force_download, Path(), Path(), Path()) # Call existing for download/unzip/licence
+
+    df["pipeline_needs_settings_update"] = False
+    df["pipeline_needs_silnlp_prompt"] = False
+    df["pipeline_needs_rename"] = False
+    df["pipeline_needs_hash"] = False
+
+    for index, row in df.iterrows():
+        # Settings Update Check (if unzipped but settings are old or missing)
+        if not pd.isna(row["status_unzip_date"]) and (
+            pd.isna(row["status_settings_xml_date"])
+            or is_date_older_than(row["status_settings_xml_date"], max_age_days)
+        ):
+            df.loc[index, "pipeline_needs_settings_update"] = True
+
+        # SILNLP Prompt Check (if settings are up-to-date but SILNLP not prompted or prompt is old)
+        if not pd.isna(row["status_settings_xml_date"]) and not is_date_older_than(row["status_settings_xml_date"], max_age_days) and \
+           (pd.isna(row["status_silnlp_prompted_date"]) or is_date_older_than(row["status_silnlp_prompted_date"], max_age_days)):
+            df.loc[index, "pipeline_needs_silnlp_prompt"] = True
+
+        # Rename Check (if SILNLP prompted, extract date exists, but rename date is missing/old)
+        # scan_and_update_status should populate status_extract_date if lang-id.txt exists
+        if not pd.isna(row["status_silnlp_prompted_date"]) and \
+           not pd.isna(row["status_extract_date"]) and \
+           (pd.isna(row["status_extract_renamed_date"]) or is_date_older_than(row["status_extract_renamed_date"], max_age_days)):
+            df.loc[index, "pipeline_needs_rename"] = True
+        
+        # If status_extract_renamed_date is set, but status_extract_path points to a lang-id file (e.g. manual intervention)
+        if not pd.isna(row["status_extract_renamed_date"]) and \
+            not pd.isna(row["status_extract_original_filename"]) and \
+            Path(row["status_extract_path"]).name == row["status_extract_original_filename"] and \
+            Path(row["status_extract_path"]).name != f"{row['translationId']}.txt":
+            df.loc[index, "pipeline_needs_rename"] = True
+
+
+        # Hash Calculation Check (if renamed files exist and hash for today is missing)
+        hash_col_today = f"hash_{today_str}"
+        if not pd.isna(row["status_extract_renamed_date"]) and not is_date_older_than(row["status_extract_renamed_date"], max_age_days*2): # Allow more time for hash
+            if hash_col_today not in df.columns or pd.isna(row.get(hash_col_today)):
+                df.loc[index, "pipeline_needs_hash"] = True
+
+    return df
+
+
+def handle_silnlp_prompting(
+    df_subset: pd.DataFrame, today_str: str
+) -> pd.DataFrame:
+    """Updates status for translations being prompted for SILNLP."""
+    if df_subset.empty:
+        return df_subset
+    logging.info(f"Marking {len(df_subset)} translations as 'SILNLP prompted' for {today_str}.")
+    # Create a copy to avoid SettingWithCopyWarning if df_subset is a slice
+    df_copy = df_subset.copy()
+    for index in df_copy.index:
+        df_copy.loc[index, "status_silnlp_prompted_date"] = today_str
+    return df_copy
+
+
+
+def print_silnlp_commands(
+    # --- Load or Initialize Status ---
+    status_path = metadata_folder / STATUS_FILENAME
+    status_df = initialize_or_load_status(status_path, translations_csv)
+    
+    is_pipeline_mode = not (args.update_settings or args.rename_extracted or args.calculate_hashes)
+
+    # --- Handle --update-settings mode ---
+    if args.update_settings:
+        report_path = metadata_folder / "settings_update.csv"
+        # Pass arguments in the correct order and without vrs_diffs
+        # Ensure it uses a copy and updates the main df later if needed, or operate directly
+        updated_status_df = update_all_settings(
+            status_df.copy(),  # Pass a copy to avoid modifying original before save
+            projects_folder,
+            report_path,
+        )
+
+        # Save the updated status file
+        try:  # Save status_df which was updated within update_all_settings
+        try:
+            # status_df was updated by update_all_settings (it modifies the passed df)
+            updated_status_df.to_csv(status_path, index=False)
+            logging.info(
+                f"\nSaved updated status after settings update to {status_path}"
+    if args.rename_extracted:
+        logging.info("--- Running in --rename-extracted mode ---")
+        # Load status, perform rename, save status, then exit
+        status_df = initialize_or_load_status(status_path, translations_csv)
+        # status_df is already loaded
+        status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+        try:
+            status_df.to_csv(status_path, index=False)
+        logging.info("--- Running in --calculate-hashes mode ---")
+        # Load status, run hash calculation, save status, then exit.
+        # This mode operates on the full status_df to find all potential corpus files.
+        status_df = initialize_or_load_status(status_path, translations_csv)
+        # status_df is already loaded
+        status_df = run_calculate_hashes_mode(
+            status_df,
+            corpus_folder,
+        logging.info("--- Hash calculation and status update complete. ---")
+        log_and_exit(LOGFILE_PATH, exit_status = 0)
+
+
+
+    # --- Scan existing folders to update status if necessary---
+    status_df = scan_and_update_status(
+        status_df,
+        downloads_folder,
+        projects_folder,
+        private_projects_folder,
+        corpus_folder,
+        private_corpus_folder,
+    )
+
+    # --- Ensure extract paths are calculated for reporting ---
+    status_df = ensure_extract_paths(status_df, corpus_folder, private_corpus_folder)
+
+    # --- Filter Translations ---
+    filtered_df = filter_translations(
+        status_df, args.allow_non_redistributable, args.verse_threshold, args.filter
+    )
+
+    if filtered_df.empty:
+        logging.info("No translations match the specified filters. Exiting.")
+        # Save status file even if empty? Maybe not necessary.
+        # filtered_df.to_csv(status_path, index=False)
+        log_and_exit(LOGFILE_PATH, exit_status = 0)
+
+    # --- Determine Actions ---
+    actions_df = determine_actions(
+        filtered_df,
+        max_age_days,
+        args.force_download,
+        downloads_folder,
+        projects_folder,
+        private_projects_folder,
+    )
+
+    # --- Execute Actions ---
+    eBible_url: str = r"https://ebible.org/Scriptures/"
+
+    # Download
+    actions_df = download_required_files(actions_df, eBible_url, downloads_folder)
+
+    # Option to stop after download (re-evaluate if needed)
+    if args.download_only:
+        logging.info(f"Stopping after download phase as requested.")
+        # Save status now
+    # --- Pipeline Mode (Default if no specific mode flags are active) ---
+    if is_pipeline_mode:
+        logging.info("--- Running in Pipeline Mode ---")
+
+        status_df = scan_and_update_status(
+            status_df, downloads_folder, projects_folder, private_projects_folder,
+            corpus_folder, private_corpus_folder
+        )
+        status_df = ensure_extract_paths(status_df, corpus_folder, private_corpus_folder)
+
+        filtered_df = filter_translations(
+            status_df.copy(), args.allow_non_redistributable, args.verse_threshold, args.filter
+        )
+
+        if filtered_df.empty:
+            logging.info("Pipeline: No translations match the specified filters. Exiting.")
+            status_df.to_csv(status_path, index=False) # Save any updates from scan
+            log_and_exit(LOGFILE_PATH, exit_status=0)
+
+        # Determine all pipeline actions needed for the filtered set
+        # This actions_df will be a subset of status_df (filtered_df) with new action columns
+        actions_df = determine_pipeline_actions(
+            filtered_df.copy(), max_age_days, args.force_download, TODAY_STR
+        )
+
+        eBible_url: str = r"https://ebible.org/Scriptures/"
+
+        # 1. Download
+        if actions_df["action_needed_download"].any():
+            logging.info("Pipeline: Downloading required files...")
+            # Pass only rows that need download, and expect full df back with updates
+            actions_df = download_required_files(actions_df, eBible_url, downloads_folder)
+            status_df.update(actions_df) # Update main status_df
+            if args.download_only:
+                logging.info("Pipeline: Stopping after download phase as requested.")
+                status_df.to_csv(status_path, index=False)
+                log_and_exit(LOGFILE_PATH, exit_status=0)
+
+        # 2. Unzip & Process (includes initial settings.xml and licence)
+        if actions_df["action_needed_unzip"].any():
+            logging.info("Pipeline: Unzipping and processing files...")
+            actions_df = unzip_and_process_files(
+                actions_df, downloads_folder, projects_folder, private_projects_folder
+            )
+            status_df.update(actions_df)
+
+        # 3. Standalone Settings Update (if needed, e.g., unzipped long ago but settings old)
+        #    unzip_and_process_files already updates settings_xml_date for new unzips.
+        #    This step is for projects that were already unzipped but need settings refresh.
+        if actions_df["pipeline_needs_settings_update"].any():
+            logging.info("Pipeline: Updating Settings.xml for relevant projects...")
+            # Create a subset of actions_df that needs settings update
+            settings_to_update_df = actions_df[actions_df["pipeline_needs_settings_update"]].copy()
+            # update_all_settings is designed to scan folders. We need a targeted update.
+            # For simplicity, we'll iterate here. A batch version would be better.
+            for index, row_to_update in settings_to_update_df.iterrows():
+                project_path = Path(row_to_update["status_unzip_path"])
+                lang_code = row_to_update["languageCode"]
+                if project_path.is_dir() and not pd.isna(lang_code):
+                    s_path, vrs, _, _ = write_settings_file(project_path, lang_code)
+                    if s_path:
+                        actions_df.loc[index, "status_settings_xml_date"] = TODAY_STR
+                        actions_df.loc[index, "status_inferred_versification"] = vrs
+            status_df.update(actions_df)
+
+        # 4. SILNLP Prompt
+        if actions_df["pipeline_needs_silnlp_prompt"].any():
+            logging.info("Pipeline: Prompting for SILNLP extraction...")
+            prompt_df_subset = actions_df[actions_df["pipeline_needs_silnlp_prompt"]].copy()
+            prompt_df_subset = handle_silnlp_prompting(prompt_df_subset, TODAY_STR)
+            actions_df.update(prompt_df_subset)
+            status_df.update(actions_df)
+            status_df.to_csv(status_path, index=False)
+            logging.info(f"Saved status to {status_path} before SILNLP prompt.")
+            print_silnlp_commands(
+                logs_folder, log_suffix, private_projects_folder,
+                private_corpus_folder, projects_folder, corpus_folder
+            )
+            logging.info("SILNLP commands printed. Please run them, then re-run this script to continue the pipeline.")
+            log_and_exit(LOGFILE_PATH)
+
+        # 5. Rename Extracted Files (Run if past SILNLP prompt stage)
+        #    This function scans folders, so it's okay to call it generally.
+        #    It will pick up files if SILNLP was run.
+        #    Check if any translation has been prompted for SILNLP or has unrenamed extracts
+        if status_df["status_silnlp_prompted_date"].notna().any() or \
+           (status_df["status_extract_date"].notna() & status_df["status_extract_renamed_date"].isna()).any():
+            logging.info("Pipeline: Renaming extracted files...")
+            status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+
+        # 6. Calculate Hashes (Run if files are likely renamed)
+        #    This function also scans/iterates, so call if appropriate.
+        if status_df["status_extract_renamed_date"].notna().any():
+            logging.info("Pipeline: Calculating hashes...")
+            status_df = run_calculate_hashes_mode(
+                status_df, corpus_folder, private_corpus_folder, TODAY_STR
+            )
+
+        # Final save for pipeline mode
+        status_df.update(actions_df)  # Ensure all updates from actions_df are in status_df
+        status_df.to_csv(status_path, index=False)
+        logging.info(f"Saved updated status to {status_path}") # status_path is defined here
+        log_and_exit(LOGFILE_PATH, exit_status=0)
+
+    # Unzip, Rename, Settings, Licence
+    actions_df = unzip_and_process_files(
+        actions_df, downloads_folder, projects_folder, private_projects_folder
+    )
+
+    # Perform licence checks for existing projects if needed
+    actions_df = check_and_update_licences(actions_df)
+
+    # --- Perform post-extraction renaming ---
+    # Pass the full status_df to scan all corpus files and update status directly
+    status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+
+    # --- Update Main Status DataFrame and Save ---
+    # Use update() which aligns on index (translationId if set, otherwise row number)
+    # Ensure index is set correctly if needed, or update based on 'translationId' column
+    status_df.set_index(
+        "translationId", inplace=True, drop=False
+    )  # Set index temporarily
+    actions_df.set_index("translationId", inplace=True, drop=False)
+    status_df.update(actions_df)
+    status_df.reset_index(drop=True, inplace=True)  # Remove index before saving
+
+    try:
+        status_df.to_csv(status_path, index=False)
+        logging.info(
+            f"\nSaved updated status for {len(status_df)} translations to {status_path}"
+        )
+    except Exception as e:
+        logging.error(f"Error saving status file {status_path}: {e}")
+
+    # --- Perform post-extraction renaming (Run again after save? Maybe not needed if run before save) ---
+    # Renaming is now done before saving the main status_df update.
+
+    # --- Report Missing Extracts ---
+    # Re-scan folders to update status one last time before reporting
+    status_df = scan_and_update_status(
+        status_df,
+        downloads_folder,
+        projects_folder,
+        private_projects_folder,
+        corpus_folder,
+        private_corpus_folder,
+    )
+
+    missing_extracts_df = status_df[
+        status_df["status_extract_date"].isna()
+        & status_df["downloadable"]
+        & ((status_df["OTverses"] + status_df["NTverses"]) >= args.verse_threshold)
+    ]
+    # Apply filters again if needed, or assume we only care about potentially processable ones
+    # missing_extracts_df = filter_translations(missing_extracts_df, args.allow_non_redistributable, args.verse_threshold, args.filter, ) # Re-filter if strict reporting needed
+
+    if not missing_extracts_df.empty:
+        logging.warning(
+            f"\n{len(missing_extracts_df)} translations appear to be missing extracted corpus files (.txt):"
+        )
+        for index, row in missing_extracts_df.iterrows():
+            logging.warning(
+                f"  - {row['translationId']}: Expected at {row['status_extract_path']}"
+            )
+
+    # --- Final Info ---
+    logging.info("\nLicence Type Summary (Processed Translations):")
+    # Filter actions_df for successfully processed ones if needed, or show all filtered
+    # Handle pandas Series logging
+    licence_counts = actions_df["licence_Licence_Type"].value_counts(dropna=False)
+    logging.info(f"\n{licence_counts.to_string()}")
+
+    # --- Print SILNLP Commands ---
+    print_silnlp_commands(
+        logs_folder,
+        log_suffix,
+        private_projects_folder,
+        private_corpus_folder,
+        projects_folder,
+        corpus_folder,
+    )
+        logging.info(f"Pipeline: Saved final status to {status_path}")
+        logging.info("Pipeline processing complete for this run.")
+
+        # Reporting (can be enhanced)
+        final_actions_df = actions_df # Use the last state of actions_df for summary
+        if not final_actions_df.empty:
+            logging.info("\nLicence Type Summary (Processed/Considered in Pipeline):")
+            licence_counts = final_actions_df["licence_Licence_Type"].value_counts(dropna=False)
+            logging.info(f"\n{licence_counts.to_string()}")
+
+    log_and_exit(LOGFILE_PATH)
+
+Key Changes and Explanations:
+
+STATUS_COLUMNS Updated:
+
+status_settings_xml_date: Tracks when Settings.xml was last generated/updated.
+status_silnlp_prompted_date: Tracks when the script last printed SILNLP commands for a project and prompted the user.
+main() Function Restructured for Pipeline:
+
+is_pipeline_mode: Determined by checking if specific mode flags (--update-settings, --rename-extracted, --calculate-hashes) are not set.
+Specific Modes First: If a specific mode flag is active, the script executes that mode's logic (largely as before, but ensuring they also update new relevant status dates like status_settings_xml_date if applicable).
+Pipeline Mode Block (if is_pipeline_mode:):
+Loads/scans status, filters translations.
+Calls determine_pipeline_actions to get a comprehensive list of what each filtered translation needs.
+Sequential Execution of Stages:
+Download: Downloads files if action_needed_download is true.
+Unzip & Process: Unzips if action_needed_unzip is true. unzip_and_process_files is modified to set status_settings_xml_date.
+Standalone Settings Update: If pipeline_needs_settings_update is true (for already unzipped projects with old/missing settings), it attempts to update Settings.xml and status_settings_xml_date.
+SILNLP Prompt: If pipeline_needs_silnlp_prompt is true, it calls handle_silnlp_prompting (which updates status_silnlp_prompted_date), saves the status, prints SILNLP commands, and then exits, instructing the user to run SILNLP and then re-run the script.
+Rename Extracted: If the script has passed the SILNLP prompt stage (globally, or for specific files), rename_extracted_files is called. This function already scans folders.
+Calculate Hashes: If files are likely renamed, run_calculate_hashes_mode is called.
+Saves the status_df at the end of the pipeline run (or before exiting for SILNLP).
+determine_pipeline_actions() Function (New):
+
+This is a new crucial function. It first calls the existing determine_actions to get download/unzip needs.
+Then, it adds new boolean columns (pipeline_needs_settings_update, pipeline_needs_silnlp_prompt, pipeline_needs_rename, pipeline_needs_hash) based on the new status columns and max_age_days.
+unzip_and_process_files() Modified:
+
+When write_settings_file is successful within this function, it now also updates df.loc[index, "status_settings_xml_date"] = TODAY_STR.
+update_all_settings() Modified:
+
+When called (typically by --update-settings mode), it now also updates status_settings_xml_date = TODAY_STR for successfully processed projects.
+handle_silnlp_prompting() Function (New):
+
+Takes a subset of the DataFrame.
+Updates status_silnlp_prompted_date to TODAY_STR for these rows.
+Returns the updated subset.
+How to Use the New Workflow:
+
+Initial Run:
+Run python ebible.py (with any desired filters like --filter, --allow_non_redistributable, etc., but without --update-settings, --rename-extracted, or --calculate-hashes).
+The script will download, unzip, create/update Settings.xml.
+If translations are ready for SILNLP, it will print the commands and exit, telling you to run SILNLP.
+Run SILNLP Commands:
+Execute the SILNLP bulk extraction commands that were printed.
+Continue Pipeline:
+Run python ebible.py again (with the same filters if used previously).
+The script will detect (via scan_and_update_status) the new .txt files from SILNLP.
+It will then proceed to rename them (to <translationId>.txt).
+Finally, it will calculate hashes for the newly renamed files.
+Specific Modes:
+You can still use --update-settings, --rename-extracted, and --calculate-hashes if you only want to perform that specific action across all relevant projects, outside the main pipeline flow.
+This refactoring provides a much more automated and state-aware process, reducing the need to remember the sequence of operations.
+
+Rate this answer: 
+Context Sources (2)
+
+David Baines
+This pipeline code seems to revert to an older method of finding the versification. One where all versifications are candidates which are eliminated one by one. However this method can easily lead to the incorrect versification being the last to be eliminated.
+
+There is a version of the code that uses the .vrs files from machine.py to calculate a likelyhood score for each of the versification systems. Then from those scores it can choose the most likely. Is that code still around in the repo? ebible.py generate_project_vrs.py compare_versifications.py update_versifications.py
+
+It might be that I've moved that inadvertently while trying to tidy up and remove unused code., I moved some code to the assets folder to be sure it isn't lost.
+
+
+Gemini
+You're right to be concerned about how the versification is determined! Using a scoring mechanism based on comparing .vrs files is indeed a more robust approach than simpler heuristics.
+
+Good news! The code that implements the likelihood scoring for versification systems is still present in your repository. You've correctly identified the key scripts involved.
+
+Here's a breakdown:
+
+c:\ebible_code\assets\update_versifications.py: This script is the heart of the scoring mechanism you're looking for.
+
+It loads standard versification files (like "English", "Vulgate", etc.) from the sil-machine library.
+It also loads project-specific .vrs files (which would be generated by generate_project_vrs.py).
+The function calculate_similarity_score within this script is where the comparison and scoring happen. It uses weights (WEIGHT_BOOK, WEIGHT_CHAPTER, WEIGHT_VERSE_COUNT) and considers "invariant chapters" to determine how closely a project's versification matches each standard.
+Finally, it can update the <Versification> tag in a project's Settings.xml file with the value of the best-matching standard versification.
+c:\ebible_code\assets\generate_project_vrs.py: This script is a crucial preparatory step.
+
+It iterates through the actual USFM content of a Paratext project.
+It generates a <project_name>.vrs file that accurately reflects the book, chapter, and maximum verse counts found in that specific project. This project-specific .vrs file is then used by update_versifications.py for scoring.
+c:\ebible_code\assets\compare_versifications.py: This script seems to be focused on generating a detailed CSV that compares verse counts across all loaded .vrs files (both standard and project-specific). While it loads and processes .vrs files similarly to update_versifications.py, its main output is the comparison data rather than updating settings files. The CSV generation logic in update_versifications.py (generate_comparison_csv function) is very similar.
+
+How ebible.py currently handles versification:
+
+In the ebible.py script you provided:
+
+During the unzip_and_process_files step (and also in the --update-settings mode), the script calls write_settings_file (imported from settings_file.py - this file was not included in the provided context).
+This write_settings_file function is responsible for creating/updating Settings.xml and determining the versification number (vrs_num), which is then stored in status_df["status_inferred_versification"].
+The Potential Discrepancy:
+
+Your concern that the ebible.py pipeline might be using an older method is valid if the settings_file.py (the one imported by ebible.py) does not incorporate the sophisticated scoring logic from c:\ebible_code\assets\update_versifications.py.
+
+Path Forward:
+
+To ensure the pipeline uses the best method:
+
+Integrate the Scoring Logic: The logic from c:\ebible_code\assets\update_versifications.py (specifically the scoring and selection of the best versification type) needs to be what ebible.py uses when it needs to determine or update the versification for a project.
+This might involve modifying the settings_file.py (that ebible.py imports) to use the functions from update_versifications.py.
+Alternatively, ebible.py could be modified to call the relevant parts of update_versifications.py directly at the appropriate stage in the pipeline (e.g., after unzipping and after generate_project_vrs.py has run for that project).
+Your intuition about moving code to the assets folder seems to be correct – the advanced versification logic is indeed located there. The next step is to bridge it back into the main ebible.py workflow if it's not already connected via the settings_file.py module.
+
+Rate this answer: 
+Context Sources (3)
+
+David Baines
+OK can you look at ebible.py settings_file.py update_versifications.py generate_project_vrs.py and compare_versifications.py to see how to reinstate the better versification scoring algorithm?
+
+
+Gemini
+Okay, I can help you integrate the more robust versification scoring algorithm into your ebible.py pipeline. This will involve a few key steps:
+
+Generating Project-Specific .vrs Files: The scoring algorithm relies on having a .vrs file for each project that accurately reflects its content. We'll add a step to the ebible.py pipeline to call the logic from generate_project_vrs.py for each project after it's unzipped.
+Modifying settings_file.py: We'll replace the current versification detection method in settings_file.py with one that uses the scoring logic. This new method will:
+Load the project's generated .vrs file.
+Load the standard versification definitions.
+Calculate similarity scores between the project's versification and each standard one, using logic adapted from update_versifications.py.
+Select the standard versification with the highest score.
+Updating ebible.py: The main script will manage the new pipeline step and ensure Settings.xml files are generated using the improved versification logic.
+Here are the proposed code changes:
+
+settings_file.py
+-315
++158
+# Get logger for this module
+logger = logging.getLogger(__name__)
+logger.info("--- settings_file.py module loaded and logger obtained ---")
+
+# --- Scoring Weights (from update_versifications.py) ---
+WEIGHT_BOOK = 0.0
+WEIGHT_CHAPTER = 0.0
+WEIGHT_VERSE_COUNT = 1.0
+
+vrs_to_num_string: dict[str, str] = {
+    "Original": "1",
+
+VALID_NUM_STRINGS = ["1", "2", "3", "4", "5", "6"]
+
+BOOK_NUM = r"[0-9].\-"
+
+EXCLUDE_ALPHANUMERICS = r"[^\w]"
+
+POST_PART = r"[a-z].+"
+
+
+def add_settings_file(project_folder, language_code):
+    """
+    (This function seems to be a simplified version and might not be directly used by ebible.py,
+    which calls write_settings_file. However, correcting it for completeness.)
+    Creates a minimal Settings.xml file in the project folder.
+    """
+    versification_name = get_versification(
+        project_folder
+    )  # get_versification now takes no vrs_diffs
+    # Get the numeric string for the versification, defaulting to "4" (English)
+    vrs_num = vrs_to_num_string.get(versification_name, "4")
+
+    # Ensure the project_folder.name part is safe for XML attribute if it contains special chars
+    # For now, assuming it's a simple name. If it can have '&', '<', '>', etc., it needs escaping.
+    post_part_val = f"{project_folder.name}.SFM" # Original: uses project_folder.name
+                                                 # Consider if this should be language_code like in write_settings_file
+
+    setting_file_stub = f"""<ScriptureText>
+    <Versification>{vrs_num}</Versification>
+    <LanguageIsoCode>{language_code}:::</LanguageIsoCode>
+    <Naming BookNameForm="41MAT" PostPart="{post_part_val}" PrePart="" />
+</ScriptureText>"""
+    # Optional: Add a newline at the end if desired for POSIX compatibility
+    setting_file_stub += "\n"
+
+    settings_file = project_folder / "Settings.xml"
+    with open(settings_file, "w") as settings:
+        settings.write(setting_file_stub)
+
+
+def check_vref(
+    prev_vref_tuple: tuple[str, int, int],
+    # available_vrs_objects is the LOADED_VRS_OBJECTS dict
+    available_vrs_objects: dict[str, Versification],
+    current_possible_names: list[str],
+) -> list[str]:  # Returns the updated list of possible names
+    """
+    Checks a verse reference against a list of candidate versification systems.
+    Rules out systems where the verse is invalid.
+
+    Args:
+        prev_vref_tuple: The verse reference (book_code, chapter_num, verse_num) to check.
+        available_vrs_objects: A dictionary of {name: Versification_object} for all loaded systems.
+        current_possible_names: A list of names of versification systems still considered possible.
+
+    Returns:
+        An updated list of names of still-possible versification systems.
+    """
+    book_code_str, chapter_num, verse_num = prev_vref_tuple
+    logger.debug(
+        f"  check_vref: Checking {prev_vref_tuple} against {len(current_possible_names)} possibilities: {current_possible_names}"
+    )
+
+    book_num = book_id_to_number(book_code_str.upper())
+    if book_num is None:
+        logger.warning(
+            f"  check_vref: Unknown book code '{book_code_str}'. Cannot perform check for this verse."
+        )
+        return current_possible_names  # No change if book code is unknown
+
+    still_possible_after_check = []
+    for vrs_name in current_possible_names:
+        vrs_obj = available_vrs_objects[vrs_name]
+        # Create a temporary VerseRef object to check its validity against the vrs_obj
+        temp_vref = VerseRef(book_num, chapter_num, verse_num, vrs_obj)
+        if temp_vref.is_valid: # Check the is_valid property of the VerseRef instance
+            still_possible_after_check.append(vrs_name)
+        else:
+            logger.debug(
+                f"    check_vref: Ruling out {vrs_name} because {prev_vref_tuple} (book_num {book_num}) is invalid in it."
+            )
+
+    if still_possible_after_check and len(still_possible_after_check) < len(
+        current_possible_names
+    ):
+        logger.info(
+            f"  check_vref: Ruled out some versifications. Remaining after checking {prev_vref_tuple}: {still_possible_after_check}"
+        )
+    try:
+        return still_possible_after_check
+    except Exception as e:  # Should not happen with list appends
+        logger.error(f"Unexpected error in check_vref logic: {e}")
+        return current_possible_names
+
+
+def stream_verse_refs_from_file(
+    usfm_path: Path, book_code: str
+) -> Iterator[tuple[str, int, int]]:
+    """
+    Reads a USFM file line by line and yields VerseRef objects for each verse.
+
+    Args:
+        usfm_path: The path to the USFM file.
+        book_code: The 3-letter canonical book code (e.g., "GEN", "MAT").
+
+    Yields:
+        tuple[str, int, int]: A tuple containing (book_code, chapter_num, verse_num).
+    """
+
+    logger.info(f"    stream_verse_refs: Attempting to open {usfm_path}")
+    current_chapter = 0
+    try:
+        # Use codecs.open for robust encoding handling
+        with codecs.open(usfm_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line_num, line in enumerate(f, 1):
+                # Check for chapter marker
+                # if line_num < 10: logger.debug(f"      Line {line_num}: {line.strip()}") # Use debug for verbose line output
+                chapter_match = re.search(r"\\c\s+(\d+)", line)
+                if chapter_match:
+                    try:
+                        current_chapter = int(chapter_match.group(1))
+                    except ValueError:
+                        # Handle cases where chapter number isn't a valid int
+                        logger.warning(
+                            f"Invalid chapter marker in {usfm_path} line {line_num}: {line.strip()}"
+                        )
+                        current_chapter = 0  # Reset chapter until next valid \c
+                    logger.debug(
+                        f"      Found chapter: {current_chapter}"
+                    )  # Debug: Confirm chapter change
+                    continue  # Move to the next line after finding a chapter
+
+                # Check for verse marker only if we have a valid current chapter
+                if current_chapter > 0:
+                    # Match verse number, potentially handling ranges like 1-2 or segments like 1a
+                    # For versification check, we only care about the starting verse number.
+                    verse_match = re.search(r"\\v\s+(\d+)", line)
+                    if verse_match:
+                        logger.debug(
+                            f"      Found verse marker: {verse_match.group(1)}"
+                        )  # Debug: Confirm verse marker found
+                        try:
+                            verse_num = int(verse_match.group(1))
+                            vref = (book_code, current_chapter, verse_num)
+                            logger.debug(f"      Yielding: {vref}")
+                            yield vref  # Yield the created tuple
+                        except ValueError:
+                            # Handle cases where verse number isn't a valid int
+                            logger.warning(
+                                f"Invalid verse marker in {usfm_path} line {line_num}: {line.strip()}"
+                            )
+
+    except FileNotFoundError:
+        # Handle case where the file doesn't exist
+        logger.error(f"    stream_verse_refs: File not found {usfm_path}")
+        # pass # Or raise the error, depending on desired behavior
+    except Exception as e:
+        # Handle other potential file reading errors
+        logger.error(f"    stream_verse_refs: Reading file {usfm_path}: {e}")
+        # pass # Or raise
+
+
+def get_versification(project_folder: Path) -> str:
+    """
+    Gets the versification of the given bible by streaming USFM files directly.
+    It compares verse references against standard .vrs definitions loaded via machine.py.
+
+    param project_folder: the path to the project folder
+    return: the name of the inferred versification (e.g., "English", "Septuagint")
+    """
+    default_versification = "English"
+    logger.info(f"Get_versification for: {project_folder.name}")
+
+    if not LOADED_VRS_OBJECTS:
+        logger.error(
+            f"No .vrs files loaded. Cannot determine versification for {project_folder.name}. Defaulting to {default_versification}."
+        )
+        return default_versification
+
+    # Start with all successfully loaded versification systems as candidates
+    possible_vrs_names = list(LOADED_VRS_OBJECTS.keys())
+    processed_first_vref = False
+    prev_vref_tuple: Optional[tuple[str, int, int]] = None
+    logger.info(
+        f"  Initial candidate versifications ({len(possible_vrs_names)}): {possible_vrs_names}"
+    )
+    processed_any_verses = (
+        False  # Flag to track if ANY verse was processed across all books
+    )
+
+    file_map = {}
+    # Regex to extract book code: assumes digits, then 3 uppercase chars (or 1-3 + 2 UC) for book code
+    # e.g., "01MATxyz.SFM" -> "MAT", "110GLOxyz.SFM" -> "GLO", "621JNxyz.SFM" -> "1JN"
+    # The regex targets the 3-character book ID part of the filename.
+    book_code_extraction_regex = re.compile(r"^\d*([A-Z1-3][A-Z0-9]{2})")
+
+    for file_path in project_folder.glob("*.SFM"):
+        filename = file_path.name
+        match = book_code_extraction_regex.match(filename)
+        if match:
+            book_code = match.group(1)
+            # Validate that the extracted code is a known book ID
+            if book_id_to_number(book_code) != 0: # 0 means unknown/invalid
+                file_map[book_code] = filename
+            else:
+                logger.debug(
+                    f"  File {filename} in {project_folder.name} has an extracted code '{book_code}' not recognized as a canonical book. Skipping for versification check."
+                )
+        else:
+            logger.warning(f"  Filename {filename} in {project_folder.name} does not match expected pattern (e.g., NNNBCODEID.SFM) for book code extraction. Skipping.")
+    sorted_book_codes = sorted(file_map.keys())  # Process books in a consistent order
+
+    # Iterate through books relevant to versification diffs found in the project
+    for book_code in sorted_book_codes:  # Iterate over books found in the project
+        if book_code in file_map:
+            usfm_path = project_folder / file_map[book_code]
+            if usfm_path.is_file():
+                logger.info(
+                    f"  Processing book: {book_code} ({usfm_path.name})"
+                )  # Use info level
+                processed_verses_in_book = False  # Flag for current book
+                # Stream verse references directly from the original file
+                for vref in stream_verse_refs_from_file(
+                    usfm_path, book_code  # type: ignore
+                ):
+                    processed_verses_in_book = (
+                        True  # Mark that we got at least one verse
+                    )
+                    if not processed_first_vref:
+                        prev_vref_tuple = vref
+                        processed_any_verses = (
+                            True  # Mark that we processed at least one verse overall
+                        )
+                        processed_first_vref = True
+                        continue
+
+                    # Check if chapter changed to trigger check_vref on the *previous* verse
+                    # Access tuple elements by index: vref[0]=book, vref[1]=chap, vref[2]=verse
+                    if prev_vref_tuple and (
+                        vref[0] != prev_vref_tuple[0]  # Compare book codes
+                        or vref[1] != prev_vref_tuple[1]  # Compare chapter numbers
+                    ):
+                        if prev_vref_tuple:  # Ensure we have a valid previous verse
+                            logger.info(
+                                f"  -> Chapter/Book change detected at {vref}. Checking {prev_vref_tuple}..."
+                            )  # Use info level
+                            possible_vrs_names = check_vref(
+                                prev_vref_tuple, LOADED_VRS_OBJECTS, possible_vrs_names
+                            )
+                            if len(possible_vrs_names) == 1:
+                                logger.info(
+                                    f"  --> Determined versification: {possible_vrs_names[0]} (during loop)"
+                                )  # Use info level
+                                return possible_vrs_names[0]
+                            elif not possible_vrs_names:
+                                logger.warning(
+                                    f"  --> All versifications ruled out after checking {prev_vref_tuple}. This is unexpected. Defaulting."
+                                )
+                                return default_versification
+
+                    prev_vref_tuple = vref  # Update previous verse ref
+
+                if not processed_verses_in_book:
+                    logger.warning(
+                        f"  No verses streamed from {usfm_path.name}"
+                    )  # Use warning level
+                logger.info(
+                    f"  Finished book {book_code}. Remaining candidate versifications: {possible_vrs_names}"
+                )  # Use info level
+
+            else:
+                logger.warning(
+                    f"  Skipping {book_code}: File not found at {usfm_path}"
+                )  # Use warning level
+        if len(possible_vrs_names) == 1:  # Check after each book
+            logger.info(
+                f"  --> Determined versification after book {book_code}: {possible_vrs_names[0]}"
+            )
+            return possible_vrs_names[0]
+        elif not possible_vrs_names:
+            logger.warning(
+                f"  --> All versifications ruled out after book {book_code}. Defaulting."
+            )
+            return default_versification
+
+    logger.info(f"  Finished all relevant books.")
+    # Final check for the very last verse processed
+    if (
+        processed_any_verses and prev_vref_tuple
+    ):  # Check if any verse was processed overall
+        logger.info(
+            f"  -> Final check for last processed verse: {prev_vref_tuple}"
+        )  # Use info level
+        possible_vrs_names = check_vref(
+            prev_vref_tuple, LOADED_VRS_OBJECTS, possible_vrs_names
+        )
+    else:
+        logging.warning(
+            f"  Warning: No verse references were processed for {project_folder.name}."
+        )
+
+    if possible_vrs_names:
+        final_choice = possible_vrs_names[0]
+        if len(possible_vrs_names) > 1:
+            logger.warning(
+                f"  Ambiguous versification for {project_folder.name}. Candidates: {possible_vrs_names}. Choosing first: {final_choice}"
+            )
+        else:
+            logger.info(
+                f"  Final determined versification for {project_folder.name}: {final_choice}"
+            )
+        return final_choice
+    else:
+        logger.error(
+            f"Could not determine versification for {project_folder.name}. All candidates ruled out or none available. Defaulting to {default_versification}."
+        )
+        return default_versification
+def get_verse_data_from_vrs_obj(vrs_obj: Versification) -> Dict[Tuple[str, int], int]:
+    """Extracts {(book_id_str, chapter_num_int): max_verse_num_int} from a Versification object."""
+    data = {}
+    if not vrs_obj:
+        return data
+    # Use book_number_to_id from machine.scripture.canon
+    from machine.scripture.canon import book_number_to_id
+    for book_num_int in range(1, vrs_obj.get_last_book() + 1):
+        book_id_str = book_number_to_id(book_num_int)
+        if not book_id_str:
+            continue
+        for chapter_num_int in range(1, vrs_obj.get_last_chapter(book_num_int) + 1):
+            max_verse = vrs_obj.get_last_verse(book_num_int, chapter_num_int)
+            if max_verse > 0: # Only include chapters with actual verses
+                data[(book_id_str, chapter_num_int)] = max_verse
+    return data
+
+def calculate_similarity_score_for_settings(
+    project_v_data: Dict[Tuple[str, int], int],
+    standard_v_data: Dict[Tuple[str, int], int],
+    invariant_chapters: set[Tuple[str, int]] # Use set for type hint
+    ) -> float:
+    """Calculates the similarity score. Adapted from update_versifications.py."""
+    # --- Book Score (overall book presence) ---
+    project_books_overall = {book for book, chap in project_v_data}
+    if not project_books_overall:
+        return 0.0 # No books in project, no similarity
+
+    standard_books_defined_overall = {book for book, chap in standard_v_data}
+    common_books = project_books_overall.intersection(standard_books_defined_overall)
+    book_score = len(common_books) / len(project_books_overall) if project_books_overall else 0.0
+
+    # --- Filter data to focus on non-invariant chapters within common books ---
+    project_bc_for_detailed_comparison = {
+        (b, c) for (b, c) in project_v_data.keys()
+        if b in common_books and (b, c) not in invariant_chapters
+    }
+    standard_bc_for_detailed_comparison = {
+        (b, c) for (b, c) in standard_v_data.keys()
+        if b in common_books and (b, c) not in invariant_chapters
+    }
+
+    common_differentiating_chapters = project_bc_for_detailed_comparison.intersection(standard_bc_for_detailed_comparison)
+    
+    num_project_differentiating_chapters = len(project_bc_for_detailed_comparison)
+    chapter_score = len(common_differentiating_chapters) / num_project_differentiating_chapters \
+        if num_project_differentiating_chapters else 0.0
+
+    matching_verse_count_differentiating_chapters = 0
+    for book, chap in common_differentiating_chapters:
+        if project_v_data.get((book, chap)) == standard_v_data.get((book, chap)):
+            matching_verse_count_differentiating_chapters += 1
+    
+    num_common_differentiating_chapters_for_verse_score = len(common_differentiating_chapters)
+    verse_count_score = matching_verse_count_differentiating_chapters / num_common_differentiating_chapters_for_verse_score \
+        if num_common_differentiating_chapters_for_verse_score else 0.0
+    
+    total_score = (WEIGHT_BOOK * book_score) + \
+                  (WEIGHT_CHAPTER * chapter_score) + \
+                  (WEIGHT_VERSE_COUNT * verse_count_score)
+    logger.debug(f"      Similarity score components: Book={book_score:.2f}, Chap={chapter_score:.2f}, Verse={verse_count_score:.2f} -> Total={total_score:.2f}")
+    return total_score
+
+
+def get_versification_with_scoring(project_folder: Path) -> str:
+    """
+    Determines the versification for a project by scoring its generated .vrs file
+    against standard versifications.
+    """
+    default_versification_name = "English"
+    logger.info(f"Get_versification_with_scoring for: {project_folder.name}")
+
+    project_vrs_filename = f"{project_folder.name}.vrs"
+    project_vrs_path = project_folder / project_vrs_filename
+    project_vrs_obj: Optional[Versification] = None
+
+    if not project_vrs_path.is_file():
+        logger.warning(f"  Project VRS file not found: {project_vrs_path}. Cannot use scoring method. Defaulting to '{default_versification_name}'.")
+        return default_versification_name
+    
+    try:
+        project_vrs_obj = Versification.load(project_vrs_path, fallback_name=project_folder.name)
+        logger.info(f"  Successfully loaded project VRS file: {project_vrs_path}")
+    except Exception as e:
+        logger.error(f"  Error loading project VRS file {project_vrs_path}: {e}. Defaulting to '{default_versification_name}'.")
+        return default_versification_name
+
+    if not project_vrs_obj: # Should be caught by above, but as a safeguard
+        return default_versification_name
+
+    project_verse_data = get_verse_data_from_vrs_obj(project_vrs_obj)
+    if not project_verse_data:
+        logger.warning(f"  No verse data extracted from project VRS {project_vrs_filename}. Defaulting to '{default_versification_name}'.")
+        return default_versification_name
+
+    if not LOADED_VRS_OBJECTS: # This is the dict of standard versifications
+        logger.error("  No standard versifications (LOADED_VRS_OBJECTS) found. Cannot perform scoring. Defaulting.")
+        return default_versification_name
+
+    standard_vrs_data_map: Dict[str, Dict[Tuple[str, int], int]] = {}
+    for std_name, std_vrs_obj in LOADED_VRS_OBJECTS.items():
+        standard_vrs_data_map[std_name] = get_verse_data_from_vrs_obj(std_vrs_obj)
+
+    all_chapters_in_standards: set[Tuple[str, int]] = set()
+    for std_data in standard_vrs_data_map.values():
+        all_chapters_in_standards.update(std_data.keys())
+
+    invariant_chapters: set[Tuple[str, int]] = set()
+    if not all_chapters_in_standards:
+        logger.warning("  No chapters found in any standard versifications for invariant chapter check.")
+    else:
+        for book_chap_tuple in all_chapters_in_standards:
+            defined_verse_counts_for_chapter = []
+            for std_data in standard_vrs_data_map.values():
+                if book_chap_tuple in std_data:
+                    defined_verse_counts_for_chapter.append(std_data[book_chap_tuple])
+            if len(set(defined_verse_counts_for_chapter)) <= 1:
+                invariant_chapters.add(book_chap_tuple)
+        logger.info(f"  Identified {len(invariant_chapters)} invariant chapters among {len(all_chapters_in_standards)} unique standard chapters.")
+
+    best_score = -1.0
+    best_std_vrs_name = default_versification_name 
+
+    candidate_standard_names = list(LOADED_VRS_OBJECTS.keys())
+    # Ensure English is definitely scored if available
+    if default_versification_name not in candidate_standard_names and default_versification_name in LOADED_VRS_OBJECTS:
+         candidate_standard_names.append(default_versification_name)
+
+    for std_name in candidate_standard_names:
+        std_vrs_obj_to_score = LOADED_VRS_OBJECTS.get(std_name)
+        if not std_vrs_obj_to_score: # Should not happen if candidate_standard_names is from LOADED_VRS_OBJECTS.keys()
+            continue 
+        
+        standard_verse_data = standard_vrs_data_map.get(std_name)
+        if not standard_verse_data:
+            logger.debug(f"  No verse data for standard versification {std_name} to compare with {project_folder.name}.")
+            continue
+        
+        current_score = calculate_similarity_score_for_settings(
+            project_verse_data, standard_verse_data, invariant_chapters
+        )
+        logger.info(f"    Score for {project_folder.name} vs {std_name}: {current_score:.4f}")
+
+        if current_score > best_score:
+            best_score = current_score
+            best_std_vrs_name = std_name
+        elif current_score == best_score and std_name == "English": # Tie-breaking preference for English
+            best_std_vrs_name = "English"
+            logger.info(f"    Tie score with {best_std_vrs_name}, preferring English.")
+
+    logger.info(f"  Best match for {project_folder.name}: {best_std_vrs_name} with score: {best_score:.4f}")
+    return best_std_vrs_name
+
+
+def write_settings_file(
+                )
+
+        # --- Determine new settings ---
+        versification_name = get_versification(project_folder)
+        versification_name = get_versification_with_scoring(project_folder)
+        vrs_num_string = vrs_to_num_string.get(
+            versification_name, default_vrs_num_string
+        )
+diff
+-14
++60
+The code change produced by Gemini could not be fully parsed. Can't automatically accept changes.
+from dotenv import load_dotenv
+from rename_usfm import get_destination_file_from_book
+from settings_file import write_settings_file  # , get_vrs_diffs
+from generate_project_vrs import generate_vrs_from_project # For generating project specific .vrs
+from tqdm import tqdm
+
+# --- CONFIGURE LOGGING before importing from settings_file ---
+    "status_extract_date",
+    "status_extract_renamed_date",
+    "status_extract_original_filename",
+    "status_project_vrs_generated_date", # New: Tracks project .vrs generation
+    "status_settings_xml_date", # Tracks Settings.xml generation
+    "status_silnlp_prompted_date", # Tracks when SILNLP commands were prompted
+    "status_last_error",
+            # Rename USFM files
+            rename_usfm(project_dir)
+
+            # Generate project-specific .vrs file
+            try:
+                logging.info(f"Generating project .vrs file for {translation_id}")
+                generate_vrs_from_project(project_dir)
+                df.loc[index, "status_project_vrs_generated_date"] = TODAY_STR
+            except Exception as e_vrs:
+                logging.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
+                df.loc[index, "status_last_error"] = f"Project VRS generation failed: {e_vrs}"
+
+            # Write Settings.xml
+            # Unpack all return values, even if old/new dicts aren't used here yet
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code)
+                    )
+                    if pd.isna(lang_code):
+                        logging.warning(
+                            f"Skipping settings update for {translation_id}: Missing languageCode in status file."
+                        )
+                        continue
+                    
+                    # Ensure project .vrs exists before updating settings with scoring
+                    project_vrs_file = project_dir / f"{translation_id}.vrs"
+                    if not project_vrs_file.is_file():
+                        logging.info(f"Generating missing project .vrs file for {translation_id} before settings update.")
+                        generate_vrs_from_project(project_dir) # Generate it now
+                        status_df.loc[status_df["translationId"] == translation_id, "status_project_vrs_generated_date"] = TODAY_STR # type: ignore
+                            f"Skipping {translation_id}: Missing languageCode in status file."
+                        )
+                        continue
+    df["pipeline_needs_silnlp_prompt"] = False
+    df["pipeline_needs_rename"] = False
+    df["pipeline_needs_hash"] = False
+    df["pipeline_needs_project_vrs"] = False
+
+    for index, row in df.iterrows():
+        # Settings Update Check (if unzipped but settings are old or missing)
+            or is_date_older_than(row["status_settings_xml_date"], max_age_days)
+        ):
+            df.loc[index, "pipeline_needs_settings_update"] = True
+
+        # Project VRS Generation Check (if unzipped but project_vrs_generated_date is old or missing)
+        if not pd.isna(row["status_unzip_date"]) and (
+            pd.isna(row["status_project_vrs_generated_date"])
+            or is_date_older_than(row["status_project_vrs_generated_date"], max_age_days)):
+            df.loc[index, "pipeline_needs_project_vrs"] = True
+
+        # SILNLP Prompt Check (if settings are up-to-date but SILNLP not prompted or prompt is old)
+        if not pd.isna(row["status_settings_xml_date"]) and not is_date_older_than(row["status_settings_xml_date"], max_age_days) and \
+            )
+            status_df.update(actions_df)
+
+        # 3. Standalone Settings Update (if needed, e.g., unzipped long ago but settings old)
+        #    unzip_and_process_files already updates settings_xml_date for new unzips.
+        #    This step is for projects that were already unzipped but need settings refresh.
+        # 3. Project .VRS Generation (if needed)
+        #    unzip_and_process_files now calls generate_vrs_from_project for new unzips.
+        #    This step is for projects that were already unzipped but need their .vrs file generated/refreshed.
+        if actions_df["pipeline_needs_project_vrs"].any():
+            logging.info("Pipeline: Generating/Refreshing project .vrs files...")
+            project_vrs_to_generate_df = actions_df[actions_df["pipeline_needs_project_vrs"]].copy()
+            for idx_vrs, row_vrs in project_vrs_to_generate_df.iterrows():
+                proj_path_vrs = Path(row_vrs["status_unzip_path"])
+                if proj_path_vrs.is_dir():
+                    try:
+                        generate_vrs_from_project(proj_path_vrs)
+                        actions_df.loc[idx_vrs, "status_project_vrs_generated_date"] = TODAY_STR
+                    except Exception as e_vrs_pipe:
+                        logging.error(f"Pipeline: Error generating project .vrs for {row_vrs['translationId']}: {e_vrs_pipe}")
+                        actions_df.loc[idx_vrs, "status_last_error"] = f"Pipeline Project VRS failed: {e_vrs_pipe}"
+            status_df.update(actions_df)
+
+        # 4. Standalone Settings Update (if needed, e.g., unzipped long ago but settings old, or project.vrs was just made)
+        #    unzip_and_process_files already updates settings_xml_date for new unzips (after .vrs generation).
+        if actions_df["pipeline_needs_settings_update"].any():
+            logging.info("Pipeline: Updating Settings.xml for relevant projects...")
+            # Create a subset of actions_df that needs settings update
+            settings_to_update_df = actions_df[actions_df["pipeline_needs_settings_update"]].copy()
+            # update_all_settings is designed to scan folders. We need a targeted update.
+            # For simplicity, we'll iterate here. A batch version would be better.
+            for index, row_to_update in settings_to_update_df.iterrows():
+                project_path = Path(row_to_update["status_unzip_path"])
+                lang_code = row_to_update["languageCode"]
+                if project_path.is_dir() and not pd.isna(lang_code):
+                    s_path, vrs, _, _ = write_settings_file(project_path, lang_code)
+                    if s_path:
+                        actions_df.loc[index, "status_settings_xml_date"] = TODAY_STR
+                        actions_df.loc[index, "status_inferred_versification"] = vrs
+                project_vrs_file_check = project_path / f"{row_to_update['translationId']}.vrs"
+                if project_path.is_dir() and not pd.isna(lang_code) and project_vrs_file_check.is_file():
+                    try:
+                        s_path, vrs, _, _ = write_settings_file(project_path, lang_code)
+                        if s_path:
+                            actions_df.loc[index, "status_settings_xml_date"] = TODAY_STR
+                            actions_df.loc[index, "status_inferred_versification"] = vrs
+                    except Exception as e_settings_pipe:
+                        logging.error(f"Pipeline: Error writing settings for {row_to_update['translationId']}: {e_settings_pipe}")
+                        actions_df.loc[index, "status_last_error"] = f"Pipeline Settings.xml failed: {e_settings_pipe}"
+            status_df.update(actions_df)
+
+        # 4. SILNLP Prompt
+        # 5. SILNLP Prompt
+        if actions_df["pipeline_needs_silnlp_prompt"].any():
+            logging.info("Pipeline: Prompting for SILNLP extraction...")
+            prompt_df_subset = actions_df[actions_df["pipeline_needs_silnlp_prompt"]].copy()
+            logging.info("SILNLP commands printed. Please run them, then re-run this script to continue the pipeline.")
+            log_and_exit(LOGFILE_PATH)
+
+        # 5. Rename Extracted Files (Run if past SILNLP prompt stage)
+        # 6. Rename Extracted Files (Run if past SILNLP prompt stage)
+        #    This function scans folders, so it's okay to call it generally.
+        #    It will pick up files if SILNLP was run.
+        #    Check if any translation has been prompted for SILNLP or has unrenamed extracts
+            logging.info("Pipeline: Renaming extracted files...")
+            status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+
+        # 6. Calculate Hashes (Run if files are likely renamed)
++        # 7. Calculate Hashes (Run if files are likely renamed)
+         #    This function also scans/iterates, so call if appropriate.
+         if status_df["status_extract_renamed_date"].notna().any():
+             logging.info("Pipeline: Calculating hashes...")
+Summary of Changes:
+
+settings_file.py:
+
+The old get_versification, check_vref, and stream_verse_refs_from_file functions have been removed.
+New functions get_verse_data_from_vrs_obj, calculate_similarity_score_for_settings, and get_versification_with_scoring have been added. These implement the scoring logic, taking a project's .vrs file and comparing it against standard versifications.
+write_settings_file now calls get_versification_with_scoring.
+Added WEIGHT_BOOK, WEIGHT_CHAPTER, WEIGHT_VERSE_COUNT constants (currently 0,0,1 as in update_versifications.py).
+ebible.py:
+
+Added from generate_project_vrs import generate_vrs_from_project.
+Added a new status column status_project_vrs_generated_date to STATUS_COLUMNS.
+In unzip_and_process_files: After renaming USFM files, it now calls generate_vrs_from_project(project_dir) and updates status_project_vrs_generated_date. This ensures the project .vrs file is created before write_settings_file (which uses the scoring method) is called.
+In update_all_settings (for --update-settings mode): Before calling write_settings_file, it checks if the project's .vrs file exists. If not, it generates it on the fly.
+In determine_pipeline_actions: Added a new action check pipeline_needs_project_vrs to see if an existing unzipped project needs its .vrs file generated or refreshed.
+Pipeline Mode in main():
+Added a new step "3. Project .VRS Generation" to handle pipeline_needs_project_vrs.
+The "Standalone Settings Update" step (now step 4) will use the newly generated/refreshed .vrs files. It also includes a check to ensure the .vrs file exists before attempting to write settings.
+To Make This Work:
+
+Ensure all provided Python files (ebible.py, settings_file.py, generate_project_vrs.py, update_versifications.py, compare_versifications.py) are in the correct locations relative to each other for imports to function. Specifically, ebible.py needs to be able to import from settings_file and generate_project_vrs.
+The machine library (SIL NLP toolkit) must be installed and accessible in your Python environment.
+The weights for scoring (WEIGHT_BOOK, WEIGHT_CHAPTER, WEIGHT_VERSE_COUNT) are currently set to 0.0, 0.0, and 1.0 respectively in settings_file.py (mirroring update_versifications.py). This means only verse count similarity in non-invariant chapters will significantly influence the score. You might want to experiment with these weights if the results are not as expected.
+This integration should provide a more accurate and robust method for determining the versification for your projects within the ebible.py workflow.

@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 try:
     from machine.scripture.verse_ref import Versification, VersificationType
-    from machine.scripture.canon import book_id_to_number, book_number_to_id, LAST_BOOK
+    from machine.scripture.canon import book_id_to_number, book_number_to_id, LAST_BOOK, is_ot, is_nt
+    
     # Note: book_number_to_id and LAST_BOOK might be useful later for creating the master list
     logger.info(f"Successfully imported VersificationType from machine.scripture: {VersificationType.ENGLISH}")
     CAN_IMPORT_VERSE_REF = True
@@ -282,6 +283,9 @@ def generate_comparison_csv(args: argparse.Namespace) -> Optional[pd.DataFrame]:
         for book_num_int in range(1, vrs_obj.get_last_book() + 1): # type: ignore
             book_id_str = book_number_to_id(book_num_int)
             if not book_id_str: # Skip if book_number_to_id returns empty (e.g., invalid num)
+                continue
+            # Only include OT and NT books
+            if not (is_ot(book_num_int) or is_nt(book_num_int)):
                 continue
             for chapter_num_int in range(1, vrs_obj.get_last_chapter(book_num_int) + 1): # type: ignore
                 # Check if the chapter actually has verses defined, not just implied by get_last_chapter

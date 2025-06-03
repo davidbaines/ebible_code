@@ -11,8 +11,8 @@ Workflow:
 4. Perform downloads, updating status.
 5. Perform unzipping, renaming, settings file creation, and licence extraction,
    updating status.
-6. Save the updated ebible_status.csv.
-7. Print commands for bulk extraction using SILNLP.
+6. Perform internal text extraction for projects, updating status.
+7. Save the updated ebible_status.csv.
 """
 
 import argparse
@@ -20,6 +20,7 @@ import os
 import shutil
 import logging # Import logging
 import sys
+from contextlib import ExitStack # Potentially needed for extract_scripture_corpus if used directly
 
 # --- CONFIGURE LOGGING before importing from settings_file ---
 log_format = '%(name)s - %(levelname)s - %(message)s'
@@ -39,9 +40,10 @@ import pandas as pd
 import regex
 import requests
 from bs4 import BeautifulSoup
+from machine.corpora import ParatextTextCorpus, create_versification_ref_corpus, extract_scripture_corpus
 from dotenv import load_dotenv
 from rename_usfm import get_destination_file_from_book
-from settings_file import write_settings_file, get_vrs_diffs
+from settings_file import generate_vrs_from_project, write_settings_file 
 from tqdm import tqdm
 
 global headers
@@ -69,12 +71,12 @@ ORIGINAL_COLUMNS = [
     "sourceDate"
 ]
 
-# Add new status tracking columns
+
 STATUS_COLUMNS = [
     "status_download_path", "status_download_date", "status_unzip_path",
-    "status_unzip_date", "status_extract_path", "status_extract_date",
-     "status_extract_renamed_date",
-    "status_last_error", "status_inferred_versification" # Added new column
+    "status_unzip_date", "status_settings_xml_date", # Settings.xml creation date
+    "status_extract_path", "status_extract_date", # For internally extracted and finalized text
+    "status_last_error", "status_inferred_versification"
 ]
 
 # Add new licence tracking columns
@@ -233,14 +235,26 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
             status_df = pd.read_csv(status_path, keep_default_na=False, na_values=['']) # Treat empty strings as NA
             # Verify essential columns exist
             if not 'translationId' in status_df.columns:
-                 raise ValueError("Status file missing 'translationId' column.")
+                raise ValueError("Status file missing 'translationId' column.")
+
+            # Handle migration from old column names for extraction
+            if 'status_extract_renamed_date' in status_df.columns and 'status_extract_date' in STATUS_COLUMNS:
+                # If new 'status_extract_date' is empty and old 'status_extract_renamed_date' has data, migrate it.
+                # This assumes 'status_extract_path' from old system pointed to the SILNLP output.
+                # The new 'status_extract_path' will be for the final file.
+                # This migration is a bit tricky as paths also change.
+                # For simplicity, we'll prioritize new columns. Users might need to reprocess for full path accuracy if migrating.
+                logging.info("Detected 'status_extract_renamed_date'. Will prioritize new 'status_extract_date' if populated during scan/processing.")
+
             # Add any missing columns with default NaN values
             for col in ALL_STATUS_COLUMNS:
                 if col not in status_df.columns:
                     logging.info(f"Adding missing column '{col}' to status DataFrame.")
                     status_df[col] = np.nan
+            
             # Ensure correct order
-            status_df = status_df[ALL_STATUS_COLUMNS]
+            # Filter ALL_STATUS_COLUMNS to only include those actually present in status_df after additions, then reorder
+            status_df = status_df[[col for col in ALL_STATUS_COLUMNS if col in status_df.columns]]
 
         except Exception as e:
             logging.error(f"Error loading status file {status_path}: {e}. Attempting to rebuild.")
@@ -250,24 +264,24 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
     else:
         logging.info(f"Status file not found. Creating new one: {status_path}")
         if not translations_path.exists():
-             logging.critical(f"Error: translations file missing at {translations_path}. Cannot create status file.")
-             sys.exit(1)
+            logging.critical(f"Error: translations file missing at {translations_path}. Cannot create status file.")
+            sys.exit(1)
         try:
             # Read translations, ensuring 'translationId' is string
             trans_df = pd.read_csv(translations_path, dtype={'translationId': str}, keep_default_na=False, na_values=[''])
             if 'translationId' not in trans_df.columns:
-                 raise ValueError("Translations file missing 'translationId' column.")
+                raise ValueError("Translations file missing 'translationId' column.")
 
             # Create status DataFrame with all columns
             status_df = pd.DataFrame(columns=ALL_STATUS_COLUMNS)
 
             # Copy data from translations_df for matching columns
             for col in ORIGINAL_COLUMNS:
-                 if col in trans_df.columns:
-                      status_df[col] = trans_df[col]
-                 else:
-                      logging.warning(f"Column '{col}' not found in {translations_path}")
-                      status_df[col] = np.nan # Add as empty column if missing
+                if col in trans_df.columns:
+                    status_df[col] = trans_df[col]
+                else:
+                    logging.warning(f"Column '{col}' not found in {translations_path}")
+                    status_df[col] = np.nan # Add as empty column if missing
 
             # Initialize new status/licence columns with NaN
             for col in STATUS_COLUMNS + LICENCE_COLUMNS:
@@ -286,7 +300,7 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
     try:
         trans_df = pd.read_csv(translations_path, dtype={'translationId': str}, keep_default_na=False, na_values=[''])
         if 'translationId' not in trans_df.columns:
-             raise ValueError("Translations file missing 'translationId' column during merge check.")
+            raise ValueError("Translations file missing 'translationId' column during merge check.")
 
         existing_ids = set(status_df['translationId'].astype(str))
         upstream_ids = set(trans_df['translationId'].astype(str))
@@ -299,12 +313,12 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
             # Prepare new rows with all status columns, initializing non-original ones
             full_new_rows = pd.DataFrame(columns=ALL_STATUS_COLUMNS)
             for col in ORIGINAL_COLUMNS:
-                 if col in new_rows_df.columns:
-                      full_new_rows[col] = new_rows_df[col]
-                 else:
-                      full_new_rows[col] = np.nan
+                if col in new_rows_df.columns:
+                    full_new_rows[col] = new_rows_df[col]
+                else:
+                    full_new_rows[col] = np.nan
             for col in STATUS_COLUMNS + LICENCE_COLUMNS:
-                 full_new_rows[col] = np.nan
+                full_new_rows[col] = np.nan
 
             status_df = pd.concat([status_df, full_new_rows], ignore_index=True)
             # Consider saving immediately after adding new rows?
@@ -312,9 +326,9 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
 
         removed_ids = list(existing_ids - upstream_ids)
         if removed_ids:
-             logging.warning(f"{len(removed_ids)} translations exist in status but not in upstream {translations_path}. They will be kept but may be outdated.")
-             # Optionally, mark them as inactive or remove them:
-             # status_df = status_df[~status_df['translationId'].isin(removed_ids)]
+            logging.warning(f"{len(removed_ids)} translations exist in status but not in upstream {translations_path}. They will be kept but may be outdated.")
+            # Optionally, mark them as inactive or remove them:
+            # status_df = status_df[~status_df['translationId'].isin(removed_ids)]
 
     except Exception as e:
         logging.error(f"Error merging upstream changes from {translations_path}: {e}")
@@ -363,14 +377,12 @@ def scan_and_update_status(
                 status_df.loc[index, 'status_unzip_date'] = scan_result[1]
                 updated_count += 1
 
-        # Scan Corpus (Extracted) - Note: Extract path is less certain, depends on SILNLP output format
-        # This part might need adjustment if SILNLP naming changes. Assuming standard {lang}-{proj_name}.txt
-        # Also, status_extract_path/date might be less critical now, but we can scan for it.
+        # Scan Corpus (Extracted) - now looks for final <translationId>.txt
         if pd.isna(row['status_extract_date']):
             proj_name = translation_id
             corpus_base = corpus_folder if is_redist else private_corpus_folder
-            # Construct expected extract filename - THIS IS AN ASSUMPTION
-            expected_extract_filename = f"{lang_code}-{proj_name}.txt"
+            # Construct final expected extract filename
+            expected_extract_filename = f"{proj_name}.txt"
             extract_path = corpus_base / expected_extract_filename
             scan_result = scan_corpus_file(extract_path)
             if scan_result:
@@ -395,13 +407,11 @@ def ensure_extract_paths(
     logging.info("Ensuring status_extract_path is populated...")
     for index, row in status_df.iterrows():
         if pd.isna(row['status_extract_path']):
-            lang_code = row['languageCode']
             translation_id = row['translationId']
             is_redist = row['Redistributable'] # Assumes bool
-            proj_name = translation_id
             corpus_base = corpus_folder if is_redist else private_corpus_folder
-            expected_extract_filename = f"{lang_code}-{proj_name}.txt"
-            status_df.loc[index, 'status_extract_path'] = str((corpus_base / expected_extract_filename).resolve())
+            final_extract_filename = f"{translation_id}.txt" # Final name
+            status_df.loc[index, 'status_extract_path'] = str((corpus_base / final_extract_filename).resolve())
     return status_df
 
 
@@ -409,6 +419,12 @@ def filter_translations(df: pd.DataFrame, allow_non_redistributable: bool, verse
     """Filters the DataFrame based on criteria."""
     initial_count = len(df)
     logging.info(f"Initial translations in status file: {initial_count}")
+
+    # 0. Filter out translations with existing errors (auto-skip failed)
+    df_with_errors = df[df['status_last_error'].notna() & (df['status_last_error'] != '')]
+    if not df_with_errors.empty:
+        logging.info(f"Skipping {len(df_with_errors)} translations with pre-existing errors in 'status_last_error'.")
+    df = df[df['status_last_error'].isna() | (df['status_last_error'] == '')]
 
     # 1. Filter by downloadable flag
     df = df[df['downloadable'] == True]
@@ -442,6 +458,7 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
     df['action_needed_download'] = False
     df['action_needed_unzip'] = False
     df['action_needed_licence'] = False
+    df['action_needed_extract'] = False # New action for internal extraction
 
     for index, row in df.iterrows():
         # --- Download Check ---
@@ -451,8 +468,8 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
         elif is_date_older_than(row['status_download_date'], max_age_days):
             needs_download = True
         elif pd.isna(row['status_download_path']) or not Path(row['status_download_path']).exists():
-             # Check if file exists only if date is recent
-             needs_download = True
+            # Check if file exists only if date is recent
+            needs_download = True
 
         df.loc[index, 'action_needed_download'] = needs_download
 
@@ -465,8 +482,8 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
         elif is_date_older_than(row['status_unzip_date'], max_age_days):
             needs_unzip = True
         elif pd.isna(row['status_unzip_path']) or not Path(row['status_unzip_path']).exists():
-             # Check if dir exists only if date is recent
-             needs_unzip = True
+            # Check if dir exists only if date is recent
+            needs_unzip = True
 
         df.loc[index, 'action_needed_unzip'] = needs_unzip
 
@@ -481,6 +498,20 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
         # No path check needed here, as licence data is in the status file itself
 
         df.loc[index, 'action_needed_licence'] = needs_licence
+
+        # --- Text Extraction Check ---
+        needs_extract = False
+        if needs_unzip: # If re-unzipping, must re-extract
+            needs_extract = True
+        elif force_download: # Force implies re-extract too
+            needs_extract = True
+        elif is_date_older_than(row['status_extract_date'], max_age_days): # Using the new combined date
+            needs_extract = True
+        elif pd.isna(row['status_extract_path']) or not Path(row['status_extract_path']).exists():
+            # Check if final extracted file exists
+            needs_extract = True
+        
+        df.loc[index, 'action_needed_extract'] = needs_extract
 
     return df
 
@@ -517,7 +548,7 @@ def download_required_files(df: pd.DataFrame, base_url: str, folder: Path) -> pd
     return df
 
 
-def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path, vrs_diffs: Dict) -> pd.DataFrame: 
+def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path) -> pd.DataFrame:
     """Unzips, renames, creates settings, and extracts licence for required projects."""
     translations_to_unzip = df[df['action_needed_unzip']]
     count = len(translations_to_unzip)
@@ -537,9 +568,9 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
 
         download_path = Path(download_path_str)
         if not download_path.exists():
-             logging.warning(f"Skipping unzip for {translation_id}: Download path {download_path} not found.")
-             df.loc[index, 'status_last_error'] = f"Unzip skipped: Download not found at {download_path}"
-             continue
+            logging.warning(f"Skipping unzip for {translation_id}: Download path {download_path} not found.")
+            df.loc[index, 'status_last_error'] = f"Unzip skipped: Download not found at {download_path}"
+            continue
 
         unzip_base_dir = projects_folder if is_redist else private_projects_folder
         proj_name = translation_id
@@ -565,28 +596,39 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
             # Rename USFM files
             rename_usfm(project_dir)
 
+            # Generate project-specific .vrs file before writing Settings.xml
+            try:
+                logging.info(f"Generating project .vrs file for {translation_id}")
+                generate_vrs_from_project(project_dir)
+                # df.loc[index, "status_project_vrs_generated_date"] = TODAY_STR # This status column might be removed later
+            except Exception as e_vrs:
+                logging.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
+                df.loc[index, "status_last_error"] = f"Project VRS generation failed: {e_vrs}"
+                # Continue to attempt settings file write; scoring will use fallback or default.
+
             # Write Settings.xml
-             # Unpack all return values, even if old/new dicts aren't used here yet
-            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code, vrs_diffs)
+            # Unpack all return values, even if old/new dicts aren't used here yet
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code)
             df.loc[index, 'status_inferred_versification'] = vrs_num # Store the inferred versification number
+            if settings_path: df.loc[index, 'status_settings_xml_date'] = TODAY_STR
 
             # Extract Licence Details (only if needed or forced)
             if row['action_needed_licence']:
-                 df = get_and_update_licence_details(df, index, project_dir)
+                df = get_and_update_licence_details(df, index, project_dir)
 
             processed_count += 1
 
-        except (shutil.ReadError, FileNotFoundError, OSError, Exception) as e:
+        except (shutil.ReadError, FileNotFoundError, OSError) as e: # Catch more specific IO/OS errors
             logging.error(f"Error processing {translation_id} at {project_dir}: {e}")
             df.loc[index, 'status_unzip_path'] = np.nan
             df.loc[index, 'status_unzip_date'] = np.nan
             df.loc[index, 'status_last_error'] = f"Processing error: {e}"
             # Clean up potentially corrupted unzip dir
             if project_dir.exists():
-                 try:
-                      shutil.rmtree(project_dir)
-                 except OSError as rm_e:
-                      logging.warning(f"Could not remove failed unzip dir {project_dir}: {rm_e}")
+                try:
+                    shutil.rmtree(project_dir)
+                except OSError as rm_e:
+                    logging.warning(f"Could not remove failed unzip dir {project_dir}: {rm_e}")
 
     logging.info(f"Finished processing. Successfully processed {processed_count}/{count} projects.")
     return df
@@ -609,21 +651,20 @@ def rename_usfm(project_dir: Path):
             old_usfm_path.rename(new_sfm_path)
             renamed_count += 1
         if renamed_count > 0:
-             logging.info(f"Renamed {renamed_count} USFM files.")
+            logging.info(f"Renamed {renamed_count} USFM files.")
     except Exception as e:
         logging.error(f"Error renaming USFM files in {project_dir}: {e}")
-
 
 
 def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -> pd.DataFrame:
     """Extracts licence details from copr.htm and updates the DataFrame row."""
     copyright_path = project_dir / "copr.htm"
-    logging.info(f"Extracting licence info for {project_dir.name} from {copyright_path}")
+    logging.debug(f"Extracting licence info for {project_dir.name} from {copyright_path}")
 
     # Clear previous licence data for this row first
     for col in LICENCE_COLUMNS:
-        if col != 'licence_date_read': # Keep date read until success
-             df.loc[index, col] = np.nan
+        if col != 'licence_date_read': # Keep date read until success or new attempt
+            df.loc[index, col] = np.nan
 
     if not copyright_path.exists():
         logging.warning(f"Unable to find {copyright_path}")
@@ -651,10 +692,10 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
                     entry["licence_Licence_Type"] = cc_match.group(1)
                     entry["licence_Licence_Version"] = cc_match.group(2)
                 else: # Handle simpler cases like /by/4.0/
-                     cc_match_simple = regex.search(r"/licenses/([a-z\-]+)/?", ref)
-                     if cc_match_simple:
-                          entry["licence_Licence_Type"] = cc_match_simple.group(1)
-                          # Try to find version elsewhere if needed
+                    cc_match_simple = regex.search(r"/licenses/([a-z\-]+)/?", ref)
+                    if cc_match_simple:
+                        entry["licence_Licence_Type"] = cc_match_simple.group(1)
+                        # Try to find version elsewhere if needed
 
         titlelink = soup.find(href=regex.compile(f"https://ebible.org/{entry['licence_ID']}"))
         if titlelink and titlelink.string:
@@ -663,12 +704,12 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
         # Extract text, handle potential missing <p> or body
         body_tag = soup.body
         if body_tag and body_tag.p:
-             copy_strings = [s.strip() for s in body_tag.p.stripped_strings if s.strip()]
+            copy_strings = [s.strip() for s in body_tag.p.stripped_strings if s.strip()]
         elif body_tag:
-             copy_strings = [s.strip() for s in body_tag.stripped_strings if s.strip()]
+            copy_strings = [s.strip() for s in body_tag.stripped_strings if s.strip()]
         else:
-             copy_strings = []
-             logging.warning(f"Warning: No body or paragraph tag found in {copyright_path}")
+            copy_strings = []
+            logging.warning(f"Warning: No body or paragraph tag found in {copyright_path}")
 
 
         # Simpler text parsing logic
@@ -678,21 +719,21 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
                 is_public_domain = True
                 break # Assume PD overrides other info
             elif "copyright ©" in text.lower():
-                 entry["licence_Copyright_Years"] = text # Keep full string for now
-                 if i + 1 < len(copy_strings):
-                      entry["licence_Copyright_Holder"] = copy_strings[i+1]
+                entry["licence_Copyright_Years"] = text # Keep full string for now
+                if i + 1 < len(copy_strings):
+                    entry["licence_Copyright_Holder"] = copy_strings[i+1]
             elif text.lower().startswith("language:"):
-                 if i + 1 < len(copy_strings):
-                      entry["licence_Language"] = copy_strings[i+1]
+                if i + 1 < len(copy_strings):
+                    entry["licence_Language"] = copy_strings[i+1]
             elif text.lower().startswith("dialect"): # Handles "Dialect:" or "Dialect (if applicable):"
-                 # Take rest of string after colon, or the next string if current is just "Dialect:"
-                 parts = text.split(":", 1)
-                 if len(parts) > 1 and parts[1].strip():
-                      entry["licence_Dialect"] = parts[1].strip()
-                 elif i + 1 < len(copy_strings):
-                      entry["licence_Dialect"] = copy_strings[i+1]
+                # Take rest of string after colon, or the next string if current is just "Dialect:"
+                parts = text.split(":", 1)
+                if len(parts) > 1 and parts[1].strip():
+                    entry["licence_Dialect"] = parts[1].strip()
+                elif i + 1 < len(copy_strings):
+                    entry["licence_Dialect"] = copy_strings[i+1]
             elif "translation by" in text.lower():
-                 entry["licence_Translation_by"] = text # Keep full string
+                entry["licence_Translation_by"] = text # Keep full string
 
         if is_public_domain:
             entry["licence_Copyright_Holder"] = "Public Domain"
@@ -701,29 +742,29 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
 
         # --- Data Cleaning/Defaults ---
         if pd.isna(entry.get("licence_Licence_Type")):
-             if "Public Domain" == entry.get("licence_Copyright_Holder"):
-                  entry["licence_Licence_Type"] = "Public Domain"
-             elif entry.get("licence_CC_Licence_Link"):
-                  entry["licence_Licence_Type"] = "CC (Unknown Version)" # Indicate CC link exists but type/version parse failed
-             else:
-                  entry["licence_Licence_Type"] = "Unknown" # Default if no other info
+            if "Public Domain" == entry.get("licence_Copyright_Holder"):
+                entry["licence_Licence_Type"] = "Public Domain"
+            elif entry.get("licence_CC_Licence_Link"):
+                entry["licence_Licence_Type"] = "CC (Unknown Version)" # Indicate CC link exists but type/version parse failed
+            else:
+                entry["licence_Licence_Type"] = "Unknown" # Default if no other info
 
         # Apply specific known fixes (example)
         if entry["licence_ID"] in ["engwmb", "engwmbb"]:
-             entry["licence_Copyright_Holder"] = "Public Domain"
-             entry["licence_Licence_Type"] = "Public Domain"
+            entry["licence_Copyright_Holder"] = "Public Domain"
+            entry["licence_Licence_Type"] = "Public Domain"
 
         # Update DataFrame row
         for col_suffix, value in entry.items():
-             # col_name = f"licence_{col_suffix}" # Prefix already included in entry keys
-             if col_suffix in df.columns:
-                  df.loc[index, col_suffix] = value
-             else:
-                  logging.warning(f"Licence key '{col_suffix}' not a column in DataFrame.")
+            # col_name = f"licence_{col_suffix}" # Prefix already included in entry keys
+            if col_suffix in df.columns:
+                df.loc[index, col_suffix] = value
+            else:
+                logging.warning(f"Licence key '{col_suffix}' not a column in DataFrame.")
 
         df.loc[index, 'licence_date_read'] = TODAY_STR
         df.loc[index, 'status_last_error'] = np.nan # Clear error on success
-        logging.info(f"Successfully extracted licence info for {project_dir.name}")
+        logging.debug(f"Successfully extracted licence info for {project_dir.name}")
 
     except Exception as e:
         logging.error(f"Error parsing licence file {copyright_path}: {e}")
@@ -731,6 +772,7 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
         df.loc[index, 'licence_date_read'] = TODAY_STR # Mark as checked today, even if failed
 
     return df
+
 
 def check_and_update_licences(df: pd.DataFrame) -> pd.DataFrame:
     """Checks and updates licence details for projects that weren't re-unzipped but need a licence check."""
@@ -740,7 +782,6 @@ def check_and_update_licences(df: pd.DataFrame) -> pd.DataFrame:
 
     if count == 0:
         logging.info(f"No existing projects require a separate licence check.")
-        logging.info("No existing projects require a separate licence check.")
         return df
 
     logging.info(f"Performing licence check for {count} existing projects...")
@@ -762,140 +803,118 @@ def check_and_update_licences(df: pd.DataFrame) -> pd.DataFrame:
     logging.info(f"Finished separate licence check. Updated {checked_count}/{count} projects.")
     return df
 
-def rename_extracted_files(
-    status_df: pd.DataFrame,  # The full, unfiltered status DataFrame
+
+def extract_project( # Renamed from _perform_text_extraction_for_project
+    project_dir_path: Path,
+    output_file_path: Path,
+    translation_id: str # For logging
+) -> tuple[bool, Optional[str], int]: # Returns: Success_flag, error_message, segment_count
+    """
+    Extracts text from a Paratext project directory to a specified output file.
+    Assumes Settings.xml is already present in project_dir_path.
+    """
+    logging.debug(f"Starting text extraction for {translation_id} from {project_dir_path} to {output_file_path}")
+    try:
+        # ParatextTextCorpus uses Settings.xml within project_dir_path for versification.
+        # include_markers=False is the default for typical parallel corpus text.
+        project_corpus = ParatextTextCorpus(str(project_dir_path), include_markers=False)
+        
+        # ref_corpus is based on the standard vref.txt that machine.corpora knows.
+        # This ensures alignment to a common verse reference scheme.
+        ref_corpus = create_versification_ref_corpus()
+
+        # The user wants all books, so no filtering logic for include_books/exclude_books is applied here.
+
+        segment_count = 0
+        # extract_scripture_corpus is a context manager.
+        with output_file_path.open("w", encoding="utf-8", newline="\n") as output_stream, \
+             extract_scripture_corpus(project_corpus, ref_corpus) as output_lines_iterator:
+            
+            for line_content, _ref_vref, _project_vref in output_lines_iterator:
+                output_stream.write(line_content + "\n")
+                segment_count += 1
+        
+        if segment_count == 0:
+            logging.warning(f"Extraction for {translation_id} resulted in 0 segments. Output file {output_file_path} created but is empty.")
+
+        logging.debug(f"Successfully extracted {segment_count} segments for {translation_id} to {output_file_path}")
+        return True, None, segment_count
+
+    except Exception as e:
+        logging.error(f"Error during text extraction for {translation_id} from {project_dir_path} to {output_file_path}: {e}", exc_info=True)
+        if output_file_path.exists():
+            try:
+                output_file_path.unlink()
+                logging.info(f"Removed incomplete output file: {output_file_path}")
+            except OSError as unlink_e:
+                logging.error(f"Error removing incomplete extraction output {output_file_path}: {unlink_e}")
+        return False, str(e), 0
+
+
+def extract_and_finalize_texts(
+    df: pd.DataFrame,
     corpus_folder: Path,
     private_corpus_folder: Path
 ) -> pd.DataFrame:
     """
-    Scans corpus folders for .txt files, renames them from SILNLP output format
-    (lang_code-translation_id.txt) to translation_id.txt.
-    Updates status_df with rename status and correct paths.
-    Reports on files processed and any unexpected files found.
+    Performs internal text extraction for projects marked with 'action_needed_extract'.
     """
-    logging.info("Starting scan of corpus folders to rename extracted files...")
+    translations_to_extract = df[df['action_needed_extract']]
+    count = len(translations_to_extract)
+    logging.info(f"Attempting to extract text for {count} projects...")
 
-    renamed_files_log = []
-    target_exists_skipped_log = []
-    already_correct_name_log = []
-    unknown_txt_files_log = []
-    non_txt_files_log = []
-    failed_to_rename_log = []
+    extracted_count = 0
+    # Assign tqdm iterator to a variable to allow dynamic description updates
+    pbar = tqdm(translations_to_extract.iterrows(), total=count, desc="Initializing extraction...")
+    for index, row in pbar:
+        translation_id = row['translationId']
+        project_unzip_path_str = row['status_unzip_path']
+        is_redist = row['Redistributable']
 
-    files_processed_count = 0
+        # Default display names for tqdm, in case of early skip
+        project_display_name = translation_id
+        output_display_name = f"{translation_id}.txt (target)"
 
-    for folder_to_scan in [corpus_folder, private_corpus_folder]:
-        if not folder_to_scan.is_dir():
-            logging.warning(f"Corpus folder not found, skipping: {folder_to_scan}")
+        if pd.isna(project_unzip_path_str):
+            # Update description for skipped item
+            pbar.set_description_str(f"Skipping {translation_id} (no unzip_path)")
+            logging.warning(f"Skipping extraction for {translation_id}: No valid unzip path.")
+            df.loc[index, 'status_last_error'] = "Extraction skipped: Missing unzip path"
             continue
         
-        logging.info(f"Scanning folder: {folder_to_scan}")
-        # Sort for consistent processing order, helpful for debugging/review
-        discovered_files = sorted(list(folder_to_scan.glob('*'))) 
+        project_dir_path = Path(project_unzip_path_str)
+        project_display_name = project_dir_path.name # Actual project folder name
+
+        if not project_dir_path.is_dir():
+            pbar.set_description_str(f"Skipping {project_display_name} (project dir not found)")
+            logging.warning(f"Skipping extraction for {translation_id}: Project directory not found at {project_dir_path}.")
+            df.loc[index, 'status_last_error'] = f"Extraction skipped: Project dir not found at {project_dir_path}"
+            continue
+
+        target_corpus_folder = corpus_folder if is_redist else private_corpus_folder
+        # Output filename is now directly the final name, e.g., KJV.txt
+        output_file_path = target_corpus_folder / f"{translation_id}.txt"
+        output_display_name = output_file_path.name # Actual output file name
+
+        # Set the description for the current item being actively processed
+        pbar.set_description_str(f"Extracting {project_display_name} -> {output_display_name}")
         
-        for filepath in discovered_files:
-            files_processed_count += 1
-            filename = filepath.name
-            filestem = filepath.stem
+        success, error_msg, _segment_count = extract_project( # Call the renamed function
+            project_dir_path, output_file_path, translation_id
+        )
 
-            if not filepath.is_file(): # Skip directories
-                continue
+        if success:
+            df.loc[index, 'status_extract_path'] = str(output_file_path.resolve())
+            df.loc[index, 'status_extract_date'] = TODAY_STR
+            df.loc[index, 'status_last_error'] = np.nan # Clear error on success
+            extracted_count +=1
+        else:
+            df.loc[index, 'status_extract_path'] = np.nan
+            df.loc[index, 'status_extract_date'] = np.nan
+            df.loc[index, 'status_last_error'] = f"Extraction failed: {error_msg}"
 
-            if filepath.suffix.lower() != '.txt':
-                non_txt_files_log.append(str(filepath.resolve()))
-                continue
-
-            # Try to parse as <lang_code>-<translation_id_part>.txt
-            parts = filestem.split('-', 1)
-            processed_this_file = False
-
-            if len(parts) == 2: # Potential lang-id.txt
-                potential_lang_code, potential_id_from_file = parts[0], parts[1]
-                
-                matching_rows = status_df[
-                    (status_df['languageCode'] == potential_lang_code) &
-                    (status_df['translationId'] == potential_id_from_file)
-                ]
-
-                if not matching_rows.empty:
-                    original_df_idx = matching_rows.index[0]
-                    target_name = f"{potential_id_from_file}.txt"
-                    target_path = filepath.with_name(target_name)
-
-                    if filepath.name != target_name: # Only proceed if current name is different from target
-                        if target_path.exists():
-                            target_exists_skipped_log.append(
-                                f"{filename} (target {target_name} already exists in {folder_to_scan})"
-                            )
-                            if pd.isna(status_df.loc[original_df_idx, 'status_extract_renamed_date']):
-                                status_df.loc[original_df_idx, 'status_extract_renamed_date'] = TODAY_STR
-                            status_df.loc[original_df_idx, 'status_extract_path'] = str(target_path.resolve())
-                            status_df.loc[original_df_idx, 'status_last_error'] = f"Rename skipped; target {target_name} exists."
-                            processed_this_file = True
-                        else: # Target does not exist, and current file is different
-                            try:
-                                filepath.rename(target_path)
-                                renamed_files_log.append(f"{filename} -> {target_name} in {folder_to_scan}")
-                                status_df.loc[original_df_idx, 'status_extract_renamed_date'] = TODAY_STR
-                                status_df.loc[original_df_idx, 'status_extract_path'] = str(target_path.resolve())
-                                status_df.loc[original_df_idx, 'status_last_error'] = np.nan
-                            except OSError as e:
-                                logging.error(f"Error renaming {filepath} to {target_path}: {e}")
-                                failed_to_rename_log.append(f"{filename} (in {folder_to_scan}, error: {e})")
-                                status_df.loc[original_df_idx, 'status_last_error'] = f"Extract rename failed: {e}"
-                            processed_this_file = True
-            
-            if processed_this_file:
-                continue
-
-            # If not processed as lang-id.txt, check if it's a correctly named id.txt or unknown
-            matching_rows_direct = status_df[status_df['translationId'] == filestem]
-
-            if not matching_rows_direct.empty:
-                original_df_idx_direct = matching_rows_direct.index[0]
-                already_correct_name_log.append(f"{filename} (in {folder_to_scan})")
-                
-                if pd.isna(status_df.loc[original_df_idx_direct, 'status_extract_renamed_date']):
-                    status_df.loc[original_df_idx_direct, 'status_extract_renamed_date'] = TODAY_STR
-                status_df.loc[original_df_idx_direct, 'status_extract_path'] = str(filepath.resolve())
-                if "Extract rename failed" in str(status_df.loc[original_df_idx_direct, 'status_last_error']) or \
-                   "Rename skipped" in str(status_df.loc[original_df_idx_direct, 'status_last_error']):
-                    status_df.loc[original_df_idx_direct, 'status_last_error'] = np.nan
-                processed_this_file = True
-            
-            if not processed_this_file:
-                unknown_txt_files_log.append(f"{filename} (in {folder_to_scan})")
-
-    logging.info(f"--- Corpus File Renaming Summary (Processed {files_processed_count} items) ---")
-    if renamed_files_log:
-        logging.info(f"Successfully renamed {len(renamed_files_log)} files:")
-        for item in renamed_files_log: logging.info(f"  - {item}")
-    if target_exists_skipped_log:
-        logging.info(f"Skipped renaming for {len(target_exists_skipped_log)} files (target already existed):")
-        for item in target_exists_skipped_log: logging.info(f"  - {item}")
-    if already_correct_name_log:
-        logging.info(f"Found {len(already_correct_name_log)} files already correctly named (status updated if needed):")
-        for item in already_correct_name_log: logging.info(f"  - {item}")
-    if failed_to_rename_log:
-        logging.error(f"Failed to rename {len(failed_to_rename_log)} files due to errors:")
-        for item in failed_to_rename_log: logging.error(f"  - {item}")
-    
-    if not unknown_txt_files_log and not non_txt_files_log:
-        logging.info("\nNo unexpected files found in corpus folders.")
-    else:
-        logging.info("\n--- Unexpected Files Report ---")
-        if unknown_txt_files_log:
-            logging.warning(f"Found {len(unknown_txt_files_log)} unknown .txt files (not matching known translation IDs or patterns):")
-            for item in unknown_txt_files_log: logging.warning(f"  - {item}")
-        if non_txt_files_log:
-            logging.warning(f"Found {len(non_txt_files_log)} non-.txt files in corpus folders:")
-            for item in non_txt_files_log: logging.warning(f"  - {item}")
-    
-    if not (renamed_files_log or target_exists_skipped_log or already_correct_name_log or failed_to_rename_log or unknown_txt_files_log or non_txt_files_log):
-        logging.info("No files required renaming and no unexpected files found in corpus folders.")
-
-    logging.info("Finished renaming extracted files.")
-    return status_df
+    logging.info(f"Finished text extraction. Successfully extracted {extracted_count}/{count} projects.")
+    return df
 
 
 # --- Function for --update-settings mode ---
@@ -904,8 +923,7 @@ def update_all_settings(
     status_df: pd.DataFrame,
     projects_folder: Path,
     private_projects_folder: Path,
-    report_path: Path,
-    vrs_diffs: Dict,
+    report_path: Path
 ) -> pd.DataFrame:
     """
     Iterates through project folders, regenerates Settings.xml, and updates status_df.
@@ -935,13 +953,25 @@ def update_all_settings(
                         logging.warning(f"Skipping {translation_id}: Missing languageCode in status file.")
                         continue
 
+                    # Ensure project .vrs exists before updating settings with scoring
+                    project_vrs_file = project_dir / f"{translation_id}.vrs"
+                    if not project_vrs_file.is_file():
+                        logging.info(f"Generating missing project .vrs file for {translation_id} before settings update.")
+                        try:
+                            generate_vrs_from_project(project_dir)
+                            # status_df.loc[status_df["translationId"] == translation_id, "status_project_vrs_generated_date"] = TODAY_STR # type: ignore
+                        except Exception as e_vrs_update:
+                            logging.error(f"Error generating project .vrs for {translation_id} during settings update: {e_vrs_update}")
+                            # Continue, write_settings_file might handle missing .vrs with a default
+
                     logging.info(f"Updating settings for {translation_id} in {project_dir}")
-                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code, vrs_diffs)
+                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code)
 
                     if settings_path:
                         # Use the original DataFrame and integer index to update
                         status_df.loc[status_df['translationId'] == translation_id, 'status_inferred_versification'] = vrs_num
-                        
+                        status_df.loc[status_df['translationId'] == translation_id, 'status_settings_xml_date'] = TODAY_STR
+
                         # Add data to report
                         report_entry = {
                             "translationId": translation_id,
@@ -967,22 +997,6 @@ def update_all_settings(
 
     logging.info(f"--- Settings update complete. Processed {processed_folders} potential project folders. ---")
     return status_df
-
-
-def print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder):
-    # Define extract log paths using the same suffix
-    public_extract_log: Path = logs_folder / ("extract_public" + log_suffix)
-    private_extract_log: Path = logs_folder / ("extract_private" + log_suffix)
-
-    # Log the commands as separate info messages
-    logging.info("\n--- Next Step: Bulk Extraction ---")
-    logging.info("Use SILNLP's bulk_extract_corpora tool.")
-    logging.info("Ensure you have SILNLP installed and configured (e.g., via poetry).")
-    logging.info("\nCommand for PRIVATE projects:")
-    logging.info(f"\n\npoetry run python -m silnlp.common.bulk_extract_corpora --input \"{private_projects_folder}\" --output \"{private_corpus_folder}\" --error-log \"{private_extract_log}\"")
-    logging.info("\nCommand for PUBLIC projects:")
-    logging.info(f"\n\npoetry run python -m silnlp.common.bulk_extract_corpora --input \"{projects_folder}\" --output \"{corpus_folder}\" --error-log \"{public_extract_log}\"")
-    logging.info("\n---------------------------------")
 
 
 
@@ -1044,10 +1058,7 @@ def main() -> None:
     private_projects_folder: Path = base / "private_projects"
     projects_folder: Path = base / "projects"
     metadata_folder: Path = base / "metadata"
-    logs_folder: Path = base / "logs"
-
-    # Get vrs_diffs
-    vrs_diffs = get_vrs_diffs()
+    logs_folder: Path = base / "logs" # Define logs_folder earlier
     
     # --- Setup Logging ---
     logs_folder.mkdir(parents=True, exist_ok=True) # Ensure log dir exists first
@@ -1098,10 +1109,9 @@ def main() -> None:
         report_path = metadata_folder / "settings_update.csv"
         updated_status_df = update_all_settings(
             status_df.copy(), # Pass a copy to avoid modifying original before save
-            report_path,
             projects_folder,
             private_projects_folder,
-            vrs_diffs,
+            report_path
         )
         
         # Save the updated status file
@@ -1111,7 +1121,7 @@ def main() -> None:
         except Exception as e:
             logging.error(f"Error saving status file {status_path} after settings update: {e}")
         # Print SILNLP commands and exit
-        print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
+        logging.info("Settings update mode finished. No further extraction commands needed as extraction is internal.")
         sys.exit(0)
 
     # --- Scan existing folders to update status if necessary---
@@ -1169,16 +1179,19 @@ def main() -> None:
     # Unzip, Rename, Settings, Licence
     actions_df = unzip_and_process_files(
         actions_df, downloads_folder, projects_folder,
-        private_projects_folder, vrs_diffs
+        private_projects_folder
     )
 
     # Perform licence checks for existing projects if needed
     actions_df = check_and_update_licences(actions_df)
 
-    # --- Perform post-extraction renaming ---
-    # Pass the full status_df to scan all corpus files and update status directly
-    status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
-    
+    # --- Perform Internal Text Extraction ---
+    actions_df = extract_and_finalize_texts(
+        actions_df,
+        corpus_folder,
+        private_corpus_folder
+    )
+
     # --- Update Main Status DataFrame and Save ---
     # Use update() which aligns on index (translationId if set, otherwise row number)
     # Ensure index is set correctly if needed, or update based on 'translationId' column
@@ -1192,9 +1205,6 @@ def main() -> None:
         logging.info(f"\nSaved updated status for {len(status_df)} translations to {status_path}")
     except Exception as e:
         logging.error(f"Error saving status file {status_path}: {e}")
-
-    # --- Perform post-extraction renaming (Run again after save? Maybe not needed if run before save) ---
-    # Renaming is now done before saving the main status_df update.
 
     # --- Report Missing Extracts ---
     # Re-scan folders to update status one last time before reporting
@@ -1216,8 +1226,7 @@ def main() -> None:
     licence_counts = actions_df['licence_Licence_Type'].value_counts(dropna=False)
     logging.info(f"\n{licence_counts.to_string()}")
 
-    # --- Print SILNLP Commands ---
-    print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
+    logging.info("\n--- ebible.py processing finished ---")
 
 
 if __name__ == "__main__":

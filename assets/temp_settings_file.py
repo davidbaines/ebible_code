@@ -8,7 +8,7 @@ import logging # Import logging
 from collections import defaultdict
 from datetime import datetime
 import re
-
+from machine.scripture import VersificationType # Ensure VersificationType is imported here
 from machine.corpora import ParatextTextCorpus
 from machine.scripture import Versification, VersificationType, book_id_to_number
 
@@ -346,23 +346,24 @@ def generate_vrs_from_project(project_path: Path) -> Optional[Path]:
     Returns the path to the generated .vrs file, or None if generation failed.
     """
     project_name = project_path.name
-    logger.info(f"Attempting to generate project .vrs for: {project_name} at {project_path}")
+    logger.info(f"Generating project .vrs for: {project_name} at {project_path}")
 
     if not project_path.is_dir():
         logger.error(f"Project path does not exist or is not a directory: {project_path}")
         return None
 
+    # Use UsfmFileTextCorpus which does not strictly require Settings.xml.
+    # Provide a default versification (English) for parsing purposes, as the project's
+    # true versification is what we are trying to determine.
+    # We need to read both .usfm and .SFM files.
     try:
-        # Use UsfmFileTextCorpus which does not strictly require Settings.xml.
-        # Provide a default versification (English) for parsing purposes, as the project's
-        # true versification is what we are trying to determine.
         from machine.corpora import UsfmFileTextCorpus # Import UsfmFileTextCorpus
         default_vrs_for_parsing = Versification.get_builtin(VersificationType.ENGLISH)
-
-        # Since all the projects are from eBible.org, they all have the same ".SFM" extension.
-        corpus = UsfmFileTextCorpus(str(project_path), file_pattern="*.SFM", versification=default_vrs_for_parsing).union(UsfmFileTextCorpus(str(project_path), file_pattern="*.SFM", versification=default_vrs_for_parsing))
-    except Exception as e: # Catching generic Exception here might be too broad; consider more specific exceptions from ParatextTextCorpus
-        logger.error(f"Could not initialize UsfmFileTextCorpus for {project_name}: {e}")
+        corpus_usfm = UsfmFileTextCorpus(str(project_path), file_pattern="*.[uU][sS][fF][mM]", versification=default_vrs_for_parsing)
+        corpus_sfm = UsfmFileTextCorpus(str(project_path), file_pattern="*.[sS][fF][mM]", versification=default_vrs_for_parsing)
+        corpus = corpus_usfm.union(corpus_sfm) # Combine corpora from both file types
+    except Exception as e:
+        logger.error(f"Could not initialize ParatextTextCorpus for {project_name}: {e}")
         return None
 
     # Structure: {book_id: {chapter_num: max_verse_num}}
@@ -389,12 +390,10 @@ def generate_vrs_from_project(project_path: Path) -> Optional[Path]:
             )
         elif chapter_num <= 0:
             logger.warning(f"Skipping verse_ref with invalid chapter {chapter_num} in {book_id} for {project_name}")
-    
-    logger.debug(f"Processed {processed_verse_refs_count} verse references for {project_name}.")
 
     if processed_verse_refs_count == 0:
+        logger.warning(f"No verse references found in project {project_name}. Skipping VRS generation.")
         return None
-    
     if not verse_data:
         logger.warning(f"No valid verse data collected for project {project_name} after processing {processed_verse_refs_count} refs. Skipping VRS generation.")
         return None

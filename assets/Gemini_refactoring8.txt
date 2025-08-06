@@ -1,0 +1,1024 @@
+
+David Baines
+How do I use Gemini Code Assist?
+
+
+Gemini
+Gemini Code Assist can help you do the following:
+
+Generate code and tests for your project
+Provide guidance on what you're trying to do with your code
+Use context from your local codebase to provide informed answers in chat
+Explain the code to you
+Show code suggestions and completions
+Find bugs and suggest fixes
+For more information on how to use Gemini in your IDE, see:
+
+Write code in VS Code with Gemini assistance
+See the Codelab
+Rate this answer: 
+
+David Baines
+The ebible.py file has lost some functionality after resetting the git repo incorrectly.
+
+Could you describe the current functionality of that file, which is the main file for this project.
+
+
+Gemini
+Okay, I can help you with that! The ebible.py script serves as the main orchestrator for a multi-step process of acquiring, preparing, and managing Bible translation data from eBible.org.
+
+Here's a breakdown of its current functionality:
+
+Initialization and Configuration:
+
+It starts by loading environment variables (e.g., from a .env file) and setting up logging to a timestamped file in the logs directory.
+It parses command-line arguments that allow you to customize its behavior, such as:
+Filtering which translations to process using a regular expression (--filter).
+Forcing re-download and processing of files (--force_download).
+Including non-redistributable (private) translations (--allow_non_redistributable).
+Stopping after only downloading files (--download_only).
+Setting a maximum age for files before they are reprocessed (--max-age-days).
+Specifying a base data folder (--base-folder).
+Setting a minimum verse count for a translation to be considered (--verse-threshold).
+Running in a special mode to only update Settings.xml files (--update-settings).
+It defines and ensures the existence of necessary data directories (e.g., corpus, downloads, projects, metadata, private_corpus, private_projects) relative to the determined base folder.
+It downloads the translations.csv file from eBible.org if it's missing or if a forced download is requested. This CSV contains metadata about available Bible translations.
+It loads versification difference data from assets/vrs_diffs.yaml, which is used later for inferring versification schemes.
+Status Management (ebible_status.csv):
+
+A core feature is the use of a status file, metadata/ebible_status.csv. This file tracks the state of each translation through various processing stages (downloaded, unzipped, licence info extracted, etc.) and stores paths and dates for these stages.
+Loading/Initialization: If ebible_status.csv exists, it's loaded. If not, it's created by taking data from translations.csv and adding columns for status tracking, licence details, and inferred versification.
+Merging Upstream Changes: It checks translations.csv for any new translations not yet in ebible_status.csv and adds them.
+Scanning Existing Data: It can scan your existing downloads, projects, and corpus folders to update the status file with information about files that are already present but whose status might not be recorded (e.g., if the script was run partially before).
+Path Calculation: It ensures the status_extract_path (the expected final path for the plain text corpus file) is calculated and stored.
+Workflow Control:
+
+--update-settings Mode: If this argument is provided, the script bypasses most of the download/unzip workflow. Instead, it:
+Iterates through all existing project folders (both public and private).
+For each project, it calls write_settings_file (from settings_file.py). This function attempts to infer the correct versification for the project by analyzing its USFM files against the vrs_diffs.yaml data and then writes/overwrites the Settings.xml file in that project directory.
+It updates the status_inferred_versification column in ebible_status.csv.
+It generates a report (settings_update.csv) detailing the changes made to Settings.xml files.
+Finally, it prints suggested commands for using SILNLP's bulk_extract_corpora tool and exits.
+Main Processing Workflow:
+Filtering: It filters the list of translations from ebible_status.csv based on criteria like whether they are downloadable, Redistributable (unless overridden), meet the verse count threshold, and match any provided regex filter.
+Determining Actions: For each filtered translation, it decides if actions like downloading, unzipping, or licence checking are needed based on force_download flags, the age of existing files/status dates (max_age_days), and whether required files/directories are actually present.
+Downloading: If needed, it downloads the USFM zip archives from eBible.org into the downloads folder. The filenames include the download date.
+Unzipping and Initial Processing: If a translation needs unzipping (or re-unzipping):
+It removes any existing project directory for that translation.
+It unzips the archive into the appropriate projects or private_projects folder.
+It renames the .usfm files within the project to a standardized NNBOOKISO.SFM format using logic from rename_usfm.py.
+It calls write_settings_file (from settings_file.py) to generate/update the Settings.xml file, inferring and storing the versification.
+It extracts licence information from the copr.htm file found in the unzipped project, parsing details like CC licence links, copyright holders, and vernacular titles, and stores this in ebible_status.csv.
+Licence Checking for Existing Projects: If a project didn't need a full re-unzip but its licence information is outdated, it re-reads and updates the licence details from the existing project's copr.htm.
+Renaming Extracted Files: After the SILNLP extraction step (which this script prepares for but doesn't run itself), this script includes a function rename_extracted_files. This function scans the corpus and private_corpus folders. It looks for files typically output by SILNLP (e.g., langcode-translationid.txt) and renames them to a simpler translationid.txt format. It updates the status_extract_path and status_extract_renamed_date in ebible_status.csv.
+Saving and Reporting:
+
+Throughout the process, it updates the main status DataFrame with the outcomes of various actions (paths, dates, errors).
+At the end of the main workflow, it saves the fully updated ebible_status.csv.
+It reports on any translations that, after all processing, still appear to be missing their final extracted corpus files.
+It provides a summary of the licence types found among the processed translations.
+Crucially, it prints out example commands for the user to run SILNLP's bulk_extract_corpora tool. This is the next step the user would typically take to convert the prepared project folders (with their USFM/SFM files and Settings.xml) into plain text corpus files.
+In summary, ebible.py automates the often tedious and error-prone tasks of fetching Bible data, organizing it, ensuring basic metadata like Settings.xml is present and correct, and tracking the status of each translation. It acts as a preparatory step, setting the stage for further NLP processing, particularly corpus extraction using tools like SILNLP.
+
+Rate this answer: 
+Context Sources (9)
+
+David Baines
+Excellent that's very helpful, thankyou. I had an earlier discussion with you, and the transcript is captured in Gemini_refactoring7.txt This was my request to make it easier to manage the fact that the script needs to be run more than once to process the "pipeline" and keeping track of the options required at each stage is difficult.
+
+The changes suggested there were implemented, and then later removed by a git reset --hard command.
+
+Can you describe the problem and ask any questions that are necessary to define what a good solution to this would look like?
+
+
+Gemini
+You're absolutely right to want to revisit the pipeline functionality! It's a common challenge with complex, multi-stage scripts that remembering the exact sequence of commands and flags can be a headache, especially if you're not running it every day. Losing those changes via a git reset --hard is frustrating, but it also gives us a good opportunity to refine the approach.
+
+Based on our previous discussion (captured in Gemini_refactoring7.txt) and your current request, here's a description of the problem we were trying to solve and some questions to help us define what an ideal solution would look like now:
+
+The Core Problem:
+
+The ebible.py script, in its non-pipeline form, requires you to manually orchestrate a sequence of steps to process Bible translations. This involves:
+
+Cumbersome Multi-Run Process: You need to run the script multiple times with different flags to achieve the full workflow:
+Initial download and unzip.
+Updating Settings.xml files (which might involve generating project .vrs files first).
+Prompting for the manual SILNLP extraction step.
+Renaming the files extracted by SILNLP.
+Calculating hashes for the final files.
+Difficulty Remembering the Order: Knowing the correct sequence of these flags and operations can be difficult to recall, leading to potential errors or missed steps.
+Lack of Clear Progress Tracking: It's not always straightforward to see how far along a particular translation is in the pipeline or what the next logical action should be without inspecting the ebible_status.csv file and mentally mapping it to the required script flags.
+The "pipeline mode" we discussed previously aimed to create a more automated and intelligent workflow where the script itself would manage the progression of each translation through these stages, using the ebible_status.csv file to track what's been done and what's next. This included a mechanism to pause for the manual SILNLP step and then gracefully resume.
+
+Questions to Define a Good Solution Now:
+
+To ensure we re-implement or enhance this pipeline in a way that best suits your current needs, could you consider the following?
+
+Reconfirming the Pipeline Goal: Is the primary objective still to have a mode (either default or via a specific flag like --run-pipeline) where ebible.py attempts to automatically take selected translations through all necessary stages: download, unzip, project .vrs generation, Settings.xml update, SILNLP prompting, renaming extracted files, and finally, hash calculation?
+
+Handling the SILNLP Manual Step: The previous pipeline plan involved the script printing the SILNLP commands, saving its state, and exiting. You would then run SILNLP manually and re-run ebible.py to continue. Is this two-step interaction for the SILNLP stage still the preferred approach?
+
+Status Tracking Details:
+
+We previously discussed adding status_settings_xml_date and status_silnlp_prompted_date to ebible_status.csv. Are these still the right fields?
+Given the recent improvements to versification, we also have status_project_vrs_generated_date. Should the pipeline explicitly track and manage the generation of project-specific .vrs files as a distinct step before Settings.xml creation?
+Invoking Pipeline Mode: Would you prefer this pipeline mode to be the default behavior if no other specific action flags (like --update-settings, --rename-extracted) are given, or is a dedicated flag (e.g., --run-pipeline) more desirable?
+
+Error Handling and Resumption in Pipeline: If a step in the pipeline fails for one translation (e.g., a download error, or an issue generating a .vrs file):
+
+Should the pipeline attempt to continue processing other translations?
+When you re-run the script, how should it handle previously failed translations? Should it automatically retry, or would you prefer to manually flag them for a retry?
+Integrating Versification Scoring: The robust versification scoring (using generate_project_vrs.py and the logic from update_versifications.py now in settings_file.py) is a key improvement.
+
+The unzip_and_process_files function in the latest diffs already calls generate_vrs_from_project and then write_settings_file (which uses scoring). Is this sequence within unzip_and_process_files sufficient for the pipeline's needs when processing newly unzipped files?
+For projects that are already unzipped but might need their .vrs or Settings.xml files updated (e.g., due to age or forced refresh), should the pipeline explicitly manage "generate project .vrs" and "update Settings.xml" as separate, trackable stages?
+Prioritization: If implementing the entire pipeline as envisioned is a significant effort, are there specific parts that would provide the most immediate benefit? For example, is automating the sequence up to the SILNLP prompt the most critical part to reinstate first?
+
+New Insights or Requirements: Since our last discussion on the pipeline, have you encountered any other pain points or had new ideas that a revamped pipeline could address? For instance, any thoughts on how to make the state of each translation even clearer to the user during a pipeline run?
+
+Your answers to these questions will be invaluable in designing a solution that makes ebible.py much more streamlined and easier to manage!
+
+Rate this answer: 
+Context Sources (11)
+
+David Baines
+Iniitially I thought that pipeline was that goal. However the main reason that is necessary is in order to handle the SILNLP bulk_extract_corpora Step manually.
+I have access to all the code that performs the extract step and most of the necessary code could be imported. It might it much more useful to incorporate that into this script so that it can run much more seamlessly. It might be good to work through all the steps for a given file in order and update the status file for it. Then move on to the next. Of course parallel processing would still be useful since there are hundreds of files to process. (I'm not sure about this idea, but it would make it easier to add an option that would update named files, and not touch any others)
+
+The previous pipeline plan involved the script printing the SILNLP commands, saving its state, and exiting. You would then run SILNLP manually and re-run ebible.py to continue. Is this two-step interaction for the SILNLP stage still the preferred approach? With thought about it Ill say that's no longer the preferred approach and I'd prefer to incorporate / import the extract code from silnlp into this script.
+
+Status Tracking Details:
+
+We previously discussed adding status_settings_xml_date and status_silnlp_prompted_date to ebible_status.csv. Are these still the right fields? If we can incorporate the silnlp extract step into this code, then the status_silnlp_prompted_date will not be needed. I think that the status_settings_xml_date is useful for the moment at least.
+
+Given the recent improvements to versification, we also have status_project_vrs_generated_date. Should the pipeline explicitly track and manage the generation of project-specific .vrs files as a distinct step before Settings.xml creation? No, we don't need to track the creation of those files, they are, I believe, incidental to the calculation of the best Versification setting.
+
+Error Handling and Resumption in Pipeline: If a step in the pipeline fails for one translation (e.g., a download error, or an issue generating a .vrs file):
+
+Should the pipeline attempt to continue processing other translations? Yes it should continue and include a brief error message in the status file. It will also be clear which have failed since many columns will be blank as a result.
+
+When you re-run the script, how should it handle previously failed translations? Should it automatically retry, or would you prefer to manually flag them for a retry? Let's have the code automatically skip them for the moment. Later we could add other options.
+
+The unzip_and_process_files function in the latest diffs already calls generate_vrs_from_project and then write_settings_file (which uses scoring). Is this sequence within unzip_and_process_files sufficient for the pipeline's needs when processing newly unzipped files? I think this sequence is sufficient.
+
+For projects that are already unzipped but might need their .vrs or Settings.xml files updated (e.g., due to age or forced refresh), should the pipeline explicitly manage "generate project .vrs" and "update Settings.xml" as separate, trackable stages? I don't think these need to be separate trackable stages. I think of creating the .vrs file for the project as a neccessary part of calculating the best versification for the Settings.xml file. There is no other time that it needs to be created. So we can assume that any status updares for the settings included a recalculation of the .vrs and of the best versification. So there's no need to track them separately.
+
+Yes let's break down the work into steps. The priority for me is
+
+Check that the robust versification scoring system is working and not harmed by the reset. (In fact the reason for the reset was to reinstate that after losing it somehow).
+Have the code run the extract process - I'll provide more code and details before we get to that.
+ebible.py: 1 lines selected
+
+Gemini
+You've got a clear vision for making ebible.py more streamlined and robust! Integrating the SILNLP extraction directly and refining the pipeline stages makes a lot of sense.
+
+1. Robust Versification Scoring:
+
+You're absolutely right to prioritize this. The good news is that the changes we discussed previously (and which were reflected in the diffs, particularly the one involving settings_file.py and the updates to ebible.py to call generate_project_vrs.py before write_settings_file) do indeed reinstate the more robust versification scoring mechanism.
+
+To summarize how it works now (or should, after those changes):
+
+When ebible.py needs to determine versification (either during unzip_and_process_files or update_all_settings):
+It ensures a project-specific .vrs file is generated by calling generate_vrs_from_project (from generate_project_vrs.py).
+It then calls write_settings_file (from settings_file.py).
+write_settings_file internally calls get_versification_with_scoring.
+get_versification_with_scoring loads the project's .vrs file and compares it against standard versifications (loaded from the machine library) using the similarity scoring logic (adapted from your update_versifications.py script, with weights like WEIGHT_VERSE_COUNT=1.0).
+The Settings.xml is then written with the best-scoring versification.
+This approach is much more reliable than the older method that relied solely on vrs_diffs.yaml.
+
+2. Pipeline Adjustments and SILNLP Integration (Phase 1 - Preparation):
+
+Based on your new preferences, we'll make the following adjustments to the pipeline logic. This set of changes prepares ebible.py for the future integration of SILNLP extraction code by removing the now-obsolete prompting steps and simplifying status tracking.
+
+Here are the code modifications:
+
+ebible.py
+-108
++132
+The code change produced by Gemini could not be fully parsed. Can't automatically accept changes.
+import pandas as pd
+import regex
+import requests
+from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from rename_usfm import get_destination_file_from_book
+from settings_file import write_settings_file, get_vrs_diffs
+from rename_usfm import get_destination_file_from_book # type: ignore
+from settings_file import write_settings_file # type: ignore
+from generate_project_vrs import generate_vrs_from_project # For generating project specific .vrs
+from tqdm import tqdm
+
+# Add new status tracking columns
+STATUS_COLUMNS = [
+    "status_download_path", "status_download_date", "status_unzip_path",
+    "status_unzip_date", "status_extract_path", "status_extract_date",
+     "status_extract_renamed_date", "status_extract_original_filename",
+    "status_project_vrs_generated_date", # New: Tracks project .vrs generation
+    "status_settings_xml_date", # Tracks Settings.xml generation
+    "status_silnlp_prompted_date", # Tracks when SILNLP commands were prompted
+    "status_unzip_date", "status_settings_xml_date", # Tracks Settings.xml generation
+    "status_extract_path", "status_extract_date", # For SILNLP output
+    "status_extract_renamed_date", "status_extract_original_filename", # For renamed SILNLP output
+    "status_last_error", "status_inferred_versification" # Added new column
+]
+
+    initial_count = len(df)
+    logging.info(f"Initial translations in status file: {initial_count}")
+
+    # 0. Filter out translations with existing errors (auto-skip failed)
+    df_with_errors = df[df['status_last_error'].notna() & (df['status_last_error'] != '')]
+    if not df_with_errors.empty:
+        logging.info(f"Skipping {len(df_with_errors)} translations with pre-existing errors in 'status_last_error'.")
+    df = df[df['status_last_error'].isna() | (df['status_last_error'] == '')]
+
+    # 1. Filter by downloadable flag
+    df = df[df['downloadable'] == True]
+    logging.info(f"Translations after 'downloadable' filter: {len(df)}")
+    df['action_needed_download'] = False
+    df['action_needed_unzip'] = False
+    df['action_needed_licence'] = False
+    df["pipeline_needs_settings_update"] = False
+    df["pipeline_needs_silnlp_prompt"] = False
+    df["pipeline_needs_settings_update"] = False # For existing projects needing only settings refresh
+    df["pipeline_needs_rename"] = False
+    df["pipeline_needs_hash"] = False
+    df["pipeline_needs_project_vrs"] = False
+
+    for index, row in df.iterrows():
+        # --- Download Check ---
+        # --- Licence Check ---
+        needs_licence = False
+        if needs_unzip: # If unzipping, must re-check licence
+            needs_licence = True
+            needs_licence = True # unzip_and_process_files handles this
+        elif force_download: # Force implies re-check
+            needs_licence = True
+            needs_licence = True # unzip_and_process_files handles this
+        elif is_date_older_than(row['licence_date_read'], max_age_days):
+            needs_licence = True
+        # No path check needed here, as licence data is in the status file itself
+
+            needs_licence = True # This is for check_and_update_licences on existing projects
+        df.loc[index, 'action_needed_licence'] = needs_licence
+
+        # Settings Update Check (if unzipped but settings are old or missing)
+            # This is for projects already unzipped, but whose settings might be old.
+            # New unzips get settings done in unzip_and_process_files.
+        if not pd.isna(row["status_unzip_date"]) and ( # Must be unzipped
+            pd.isna(row["status_settings_xml_date"])
+            or is_date_older_than(row["status_settings_xml_date"], max_age_days)
+        ):
+            df.loc[index, "pipeline_needs_settings_update"] = True
+
+        # Project VRS Generation Check (if unzipped but project_vrs_generated_date is old or missing)
+        # if not pd.isna(row["status_unzip_date"]) and (
+        #     pd.isna(row["status_project_vrs_generated_date"])
+        #     or is_date_older_than(row["status_project_vrs_generated_date"], max_age_days)):
+        #     df.loc[index, "pipeline_needs_project_vrs"] = True
+
+        # SILNLP Prompt Check (if settings are up-to-date but SILNLP not prompted or prompt is old)
+        # if not pd.isna(row["status_settings_xml_date"]) and not is_date_older_than(row["status_settings_xml_date"], max_age_days) and \
+        #    (pd.isna(row["status_silnlp_prompted_date"]) or is_date_older_than(row["status_silnlp_prompted_date"], max_age_days)):
+        #     df.loc[index, "pipeline_needs_silnlp_prompt"] = True
+
+        # Rename Check (if SILNLP prompted, extract date exists, but rename date is missing/old)
+        # scan_and_update_status should populate status_extract_date if lang-id.txt exists
+        # For now, this logic will be dormant until SILNLP is integrated.
+        # if not pd.isna(row["status_silnlp_prompted_date"]) and \
+        #    not pd.isna(row["status_extract_date"]) and \
+        # This check is for after SILNLP step (to be integrated)
+        if not pd.isna(row["status_extract_date"]) and \
+           (pd.isna(row["status_extract_renamed_date"]) or is_date_older_than(row["status_extract_renamed_date"], max_age_days)):
+            df.loc[index, "pipeline_needs_rename"] = True
+        
+            if hash_col_today not in df.columns or pd.isna(row.get(hash_col_today)):
+                df.loc[index, "pipeline_needs_hash"] = True
+
+    return df
+
+
+def handle_silnlp_prompting(
+    df_subset: pd.DataFrame, today_str: str
+) -> pd.DataFrame:
+    """Updates status for translations being prompted for SILNLP."""
+    if df_subset.empty:
+        return df_subset
+    logging.info(f"Marking {len(df_subset)} translations as 'SILNLP prompted' for {today_str}.")
+    # Create a copy to avoid SettingWithCopyWarning if df_subset is a slice
+    df_copy = df_subset.copy()
+    for index in df_copy.index:
+        df_copy.loc[index, "status_silnlp_prompted_date"] = today_str
+    return df_copy
+
+        # Settings Update Check (if unzipped but settings are old or missing)
+            # This is for projects already unzipped, but whose settings might be old.
+            # New unzips get settings done in unzip_and_process_files.
+        if not pd.isna(row["status_unzip_date"]) and not needs_unzip and ( # Must be unzipped AND not pending a re-unzip
+            pd.isna(row["status_settings_xml_date"])
+            or is_date_older_than(row["status_settings_xml_date"], max_age_days)
+        ):
+            df.loc[index, "pipeline_needs_settings_update"] = True
+    return df
+
+def download_required_files(df: pd.DataFrame, base_url: str, folder: Path) -> pd.DataFrame:
+    """Downloads files marked with action_needed_download."""
+    return df
+
+
+def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path) -> pd.DataFrame:
+def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path) -> pd.DataFrame: 
+    """Unzips, renames, creates settings, and extracts licence for required projects."""
+    translations_to_unzip = df[df['action_needed_unzip']]
+    count = len(translations_to_unzip)
+            try:
+                logging.info(f"Generating project .vrs file for {translation_id}")
+                generate_vrs_from_project(project_dir) # Generate .vrs before writing settings
+                df.loc[index, "status_project_vrs_generated_date"] = TODAY_STR
+            except Exception as e_vrs:
+                logging.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
+                df.loc[index, "status_last_error"] = f"Project VRS generation failed: {e_vrs}"
+                # Continue to attempt settings file write, it might use a fallback or default
+
+            # Write Settings.xml
+             # Unpack all return values, even if old/new dicts aren't used here yet
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code)
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code) # vrs_diffs removed
+            df.loc[index, 'status_inferred_versification'] = vrs_num # Store the inferred versification number
+            df.loc[index, 'status_settings_xml_date'] = TODAY_STR # Settings.xml was generated today
+
+def update_all_settings(
+    status_df: pd.DataFrame,
+    projects_folder: Path,
+    private_projects_folder: Path,
+    report_path: Path,
+    vrs_diffs: Dict,
+) -> pd.DataFrame:
+    """
+    Iterates through project folders, regenerates Settings.xml, and updates status_df.
+    """
+    logging.info("--- Running in --update-settings mode ---")
+                    project_vrs_file = project_dir / f"{translation_id}.vrs"
+                    if not project_vrs_file.is_file():
+                        logging.info(f"Generating missing project .vrs file for {translation_id} before settings update.")
+                        generate_vrs_from_project(project_dir) # Generate it now
+                        status_df.loc[status_df["translationId"] == translation_id, "status_project_vrs_generated_date"] = TODAY_STR # type: ignore
+                        try:
+                            generate_vrs_from_project(project_dir) # Generate it now
+                        except Exception as e_vrs_update:
+                            logging.error(f"Error generating project .vrs for {translation_id} during settings update: {e_vrs_update}")
+                            # Continue, write_settings_file might handle missing .vrs with a default
+
+                    logging.info(f"Updating settings for {translation_id} in {project_dir}")
+                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code, vrs_diffs)
+                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code) # vrs_diffs removed
+
+                    if settings_path:
+                        # Use the original DataFrame and integer index to update
+                        status_df.loc[
+                            status_df["translationId"] == translation_id, "status_inferred_versification"
+                        ] = vrs_num # type: ignore
+                        status_df.loc[status_df["translationId"] == translation_id, "status_settings_xml_date"] = TODAY_STR # type: ignore
+
+                        # Add data to report
+                        report_entry: Dict[str, Optional[str]] = {
+    private_projects_folder: Path = base / "private_projects"
+    projects_folder: Path = base / "projects"
+    metadata_folder: Path = base / "metadata"
+    logs_folder: Path = base / "logs"
+
+    # Get vrs_diffs
+    vrs_diffs = get_vrs_diffs()
+    logs_folder: Path = base / "logs" # Define logs_folder earlier
+    
+    # --- Setup Logging ---
+    logs_folder.mkdir(parents=True, exist_ok=True) # Ensure log dir exists first
+            report_path,
+            projects_folder,
+            private_projects_folder,
+            vrs_diffs,
+        )
+        
+        # Save the updated status file
+        print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
+        sys.exit(0)
+
+    # --- Pipeline Mode (Default if no specific mode flags are active) ---
+    is_pipeline_mode = not (args.update_settings or args.rename_extracted) # Simplified for now, add --calculate-hashes later
+
+
+    # --- Scan existing folders to update status if necessary---
+    status_df = scan_and_update_status(
+        status_df,
+        args.filter
+    )
+
+
+    if filtered_df.empty:
+        logging.info("No translations match the specified filters. Exiting.")
+        # Save status file even if empty? Maybe not necessary.
+        sys.exit(0)
+
+    # --- Determine Actions ---
+    actions_df = determine_actions(
+        filtered_df, max_age_days, args.force_download,
+        downloads_folder, projects_folder, private_projects_folder
+    )
+
+    # --- Execute Actions ---
+    eBible_url: str = r"https://ebible.org/Scriptures/"
+
+    # Download
+    actions_df = download_required_files(actions_df, eBible_url, downloads_folder)
+
+    # Option to stop after download (re-evaluate if needed)
+    if args.download_only:
+        logging.info(f"Stopping after download phase as requested.")
+        # Save status now
+        status_df.update(actions_df) # Update the main df with changes
+        status_df.to_csv(status_path, index=False)
+        logging.info(f"Saved updated status to {status_path}")
+        sys.exit(0)
+
+    # Unzip, Rename, Settings, Licence
+    actions_df = unzip_and_process_files(
+        actions_df, downloads_folder, projects_folder,
+        private_projects_folder, vrs_diffs
+    )
+
+    # Perform licence checks for existing projects if needed
+    actions_df = check_and_update_licences(actions_df)
+
+    # --- Perform post-extraction renaming ---
+    # Pass the full status_df to scan all corpus files and update status directly
+    status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+    # For pipeline mode, actions_df is derived from filtered_df.
+    # For non-pipeline, it's the same as filtered_df initially.
+    if is_pipeline_mode:
+        logging.info("--- Running in Pipeline Mode ---")
+        # Determine all pipeline actions needed for the filtered set
+        # This actions_df will be a subset of status_df (filtered_df) with new action columns
+        actions_df = determine_actions( # determine_actions now includes pipeline needs
+            filtered_df.copy(), max_age_days, args.force_download,
+            downloads_folder, projects_folder, private_projects_folder
+        )
+
+        eBible_url: str = r"https://ebible.org/Scriptures/"
+
+        # 1. Download
+        if actions_df["action_needed_download"].any():
+            logging.info("Pipeline: Downloading required files...")
+            actions_df = download_required_files(actions_df, eBible_url, downloads_folder)
+            status_df.update(actions_df) 
+            if args.download_only:
+                logging.info("Pipeline: Stopping after download phase as requested.")
+                status_df.to_csv(status_path, index=False)
+                sys.exit(0)
+
+        # 2. Unzip & Process (includes project.vrs, settings.xml, and licence for new unzips)
+        if actions_df["action_needed_unzip"].any():
+            logging.info("Pipeline: Unzipping and processing files...")
+            actions_df = unzip_and_process_files(
+                actions_df, downloads_folder, projects_folder, private_projects_folder
+            )
+            status_df.update(actions_df)
+
+        # 3. Standalone Settings Update (for existing projects needing settings refresh)
+        if actions_df["pipeline_needs_settings_update"].any():
+            logging.info("Pipeline: Updating Settings.xml for relevant existing projects...")
+            settings_to_update_df = actions_df[actions_df["pipeline_needs_settings_update"]].copy()
+            for index, row_to_update in settings_to_update_df.iterrows():
+                project_path = Path(row_to_update["status_unzip_path"])
+                lang_code = row_to_update["languageCode"]
+                # Ensure .vrs is generated if missing before writing settings
+                project_vrs_file_check = project_path / f"{row_to_update['translationId']}.vrs"
+                if not project_vrs_file_check.is_file():
+                    logging.info(f"Pipeline: Generating missing project .vrs for {row_to_update['translationId']} before settings update.")
+                    try:
+                        generate_vrs_from_project(project_path)
+                    except Exception as e_vrs_pipe:
+                        logging.error(f"Pipeline: Error generating project .vrs for {row_to_update['translationId']}: {e_vrs_pipe}")
+                        actions_df.loc[index, "status_last_error"] = f"Pipeline Project VRS failed: {e_vrs_pipe}"
+                        # Continue, write_settings_file might use a default
+
+                if project_path.is_dir() and not pd.isna(lang_code):
+                    try:
+                        s_path, vrs, _, _ = write_settings_file(project_path, lang_code)
+                        if s_path:
+                            actions_df.loc[index, "status_settings_xml_date"] = TODAY_STR
+                            actions_df.loc[index, "status_inferred_versification"] = vrs
+                    except Exception as e_settings_pipe:
+                        logging.error(f"Pipeline: Error writing settings for {row_to_update['translationId']}: {e_settings_pipe}")
+                        actions_df.loc[index, "status_last_error"] = f"Pipeline Settings.xml failed: {e_settings_pipe}"
+            status_df.update(actions_df)
+
+        # 4. Licence update for existing projects (if needed and not part of re-unzip)
+        #    action_needed_licence is set by determine_actions
+        #    We only call check_and_update_licences if not unzipping (unzip handles its own)
+        if actions_df["action_needed_licence"].any() and not actions_df["action_needed_unzip"].any():
+             logging.info("Pipeline: Checking/updating licences for existing projects...")
+             actions_df = check_and_update_licences(actions_df) # This function filters internally
+             status_df.update(actions_df)
+
+        # Placeholder for future SILNLP Integration (Step 5)
+        # Placeholder for Rename Extracted Files (Step 6)
+        # Placeholder for Calculate Hashes (Step 7)
+
+    else: # Not pipeline mode - run individual steps if flags are set (e.g. --rename-extracted)
+        actions_df = filtered_df.copy() # Start with the filtered list
+        if args.rename_extracted:
+            logging.info("--- Running in --rename-extracted mode ---")
+            status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+        # Add --calculate-hashes mode here if needed
+    
+    # --- Update Main Status DataFrame and Save ---
+    # Use update() which aligns on index (translationId if set, otherwise row number)
+    status_df.set_index('translationId', inplace=True, drop=False) # Set index temporarily
+    actions_df.set_index("translationId", inplace=True, drop=False)
+    status_df.update(actions_df)
+    status_df.reset_index(drop=True, inplace=True)  # Remove index before saving
+    status_df.reset_index(drop=True, inplace=True) # Remove index
+
+    # Final save
+    # Ensure all updates from actions_df (if in pipeline mode) are in status_df
+    try:
+        status_df.to_csv(status_path, index=False)
+        logging.info(f"\nSaved updated status for {len(status_df)} translations to {status_path}")
+    except Exception as e:
+        logging.error(f"Error saving status file {status_path}: {e}")
+
+    # --- Perform post-extraction renaming (Run again after save? Maybe not needed if run before save) ---
+    # Renaming is now done before saving the main status_df update.
+
+    # --- Report Missing Extracts ---
+    # Re-scan folders to update status one last time before reporting
+    status_df = scan_and_update_status(status_df, downloads_folder, projects_folder, private_projects_folder, corpus_folder, private_corpus_folder)
+    
+    # --- Final Info ---
+    logging.info("\nLicence Type Summary (Processed Translations):")
+    # Filter actions_df for successfully processed ones if needed, or show all filtered
+    # Handle pandas Series logging
+    licence_counts = actions_df['licence_Licence_Type'].value_counts(dropna=False)
+    logging.info(f"\n{licence_counts.to_string()}")
+    # Use status_df for final summary as it's the most complete
+    # Consider only translations that were attempted in this run (e.g., in filtered_df initially)
+    summary_df = status_df[status_df['translationId'].isin(filtered_df['translationId'])]
+    if not summary_df.empty:
+        licence_counts = summary_df['licence_Licence_Type'].value_counts(dropna=False)
+        logging.info(f"\n{licence_counts.to_string()}")
++    else:
++        logging.info("No translations were processed in this run to summarize licences for.")
++
+ 
+     # --- Print SILNLP Commands ---
+     print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
+
+Key Changes in this Update:
+
+Status Columns Simplified:
+
+Removed status_project_vrs_generated_date: The generation of the project-specific .vrs file is now treated as an internal step for write_settings_file and isn't tracked separately in the status CSV.
+Removed status_silnlp_prompted_date: Since the goal is to integrate SILNLP extraction, prompting is no longer a distinct, tracked step.
+status_settings_xml_date remains.
+status_extract_date, status_extract_renamed_date, etc., are kept for when SILNLP integration happens.
+Pipeline Logic Adjusted:
+
+The pipeline stage for generating project .vrs files (pipeline_needs_project_vrs) has been removed from determine_actions and the main pipeline execution block.
+unzip_and_process_files still correctly calls generate_vrs_from_project before write_settings_file for new unzips.
+The "Standalone Settings Update" step in the pipeline (for existing projects) will also ensure generate_vrs_from_project is called if the .vrs file is missing before attempting to write Settings.xml.
+The SILNLP prompting stage has been removed from the pipeline. The print_silnlp_commands function is still called at the very end for informational purposes, but the pipeline no longer pauses for it.
+The determine_actions function was simplified to reflect these removed stages.
+Error Handling (Skip Failed):
+
+filter_translations now includes a step at the beginning to automatically exclude any translations that have a non-empty status_last_error. This implements the "auto-skip failed" behavior for subsequent runs.
+get_vrs_diffs() Removed:
+
+The call to get_vrs_diffs() at the start of main() in ebible.py has been removed.
+The vrs_diffs argument has been removed from calls to write_settings_file and update_all_settings as settings_file.py no longer uses it for the scoring method.
+Next Steps (Integrating SILNLP):
+
+When you're ready to proceed with integrating the SILNLP extraction:
+
+Identify SILNLP Code: You'll need to pinpoint the core functions within SILNLP's bulk_extract_corpora.py (and any modules it depends on) that handle the actual USFM/SFM to plain text conversion for a single project.
+Adapt for Import: This might involve refactoring parts of the SILNLP code so it can be called as a library function, taking a project path and output path as arguments, rather than relying on command-line parsing internally for single-project processing.
+New Pipeline Stage: We'll add a new stage to the ebible.py pipeline (e.g., "Extract Corpus") that iterates through translations ready for extraction and calls your adapted SILNLP function.
+Status Updates: This new stage will update status_extract_date and status_extract_path in ebible_status.csv upon successful extraction.
+This current set of changes provides a cleaner foundation for that future integration. Let me know your thoughts!
+
+Rate this answer: 
+Context Sources (12)
+
+David Baines
+Would you compare the diff above with the current ebible.py code as it couldn't be applied automatically. I'm wondering whether there were changes made that prevented that or got the code out of sync. I've tried to apply some of the changes mannually, but now I'm not certain that they are remainging consistent.
+
+
+Gemini
+You're right to be meticulous about these changes, especially after a git reset and manual patching! It's very easy for inconsistencies to creep in when dealing with complex scripts and evolving logic.
+
+Let's compare the intent of the previous diff (which aimed to streamline the pipeline in preparation for direct SILNLP integration and improve versification) with the current state of your ebible.py.
+
+It appears the manual application of changes, or the git reset, has indeed left ebible.py in a state that's not fully aligned with the last set of proposed modifications. Here are the key areas where your current ebible.py differs from the goals of that previous diff:
+
+Outdated Status Columns:
+
+Your STATUS_COLUMNS list still defines status_project_vrs_generated_date and status_silnlp_prompted_date.
+The previous diff aimed to remove these, as project .vrs generation was to become an internal step for settings, and SILNLP prompting was to be removed in favor of future direct integration.
+Lingering vrs_diffs Logic:
+
+Your main() function still calls get_vrs_diffs().
+The vrs_diffs variable is still being passed to unzip_and_process_files and update_all_settings.
+This conflicts with the changes made in settings_file.py (from the previous diff you accepted) which removed vrs_diffs as a parameter and switched to the scoring-based versification method that doesn't rely on vrs_diffs.yaml. This is likely a source of errors or incorrect behavior.
+Pipeline Discrepancies in main():
+
+The if is_pipeline_mode: block in your main() function still contains logic for:
+An explicit "Project .VRS Generation" step (checking actions_df["pipeline_needs_project_vrs"]).
+An explicit "SILNLP Prompt" step (checking actions_df["pipeline_needs_silnlp_prompt"] and calling handle_silnlp_prompting).
+The determine_actions function in your current ebible.py is the simpler version that doesn't set these pipeline_needs_project_vrs or pipeline_needs_silnlp_prompt flags. This means those pipeline steps in main() would likely never trigger as intended.
+The previous diff intended to remove these explicit pipeline stages, making project .vrs generation an implicit part of settings creation and removing the SILNLP prompt entirely.
+Status Updates for Removed Stages:
+
+Functions like unzip_and_process_files and update_all_settings are still trying to update status_project_vrs_generated_date.
+To bring your ebible.py into alignment with the streamlined approach (robust versification scoring without vrs_diffs.yaml, and a pipeline ready for direct SILNLP integration rather than prompting), here's a diff against your current ebible.py file. This diff effectively re-applies the necessary changes:
+
+ebible.py
+-106
++120
+The code change produced by Gemini could not be fully parsed. Can't automatically accept changes.
+STATUS_COLUMNS = [
+    "status_download_path", "status_download_date", "status_unzip_path",
+    "status_unzip_date", "status_settings_xml_date",
+    "status_extract_path", "status_extract_date",
+    "status_extract_renamed_date", "status_extract_original_filename",
+    "status_project_vrs_generated_date", # New: Tracks project .vrs generation
+    "status_silnlp_prompted_date", # Tracks when SILNLP commands were prompted
+    "status_extract_path", "status_extract_date", # For SILNLP output
+    "status_extract_renamed_date", "status_extract_original_filename", # For renamed SILNLP output
+    "status_last_error", "status_inferred_versification"
+]
+
+    df["pipeline_needs_settings_update"] = False
+    df["pipeline_needs_rename"] = False
+    df["pipeline_needs_hash"] = False
+    df["pipeline_needs_project_vrs"] = False
+
+    for index, row in df.iterrows():
+        # --- Download Check ---
+        needs_download = False
+        # No path check needed here, as licence data is in the status file itself
+
+        df.loc[index, 'action_needed_licence'] = needs_licence
+
+        # Settings Update Check (if unzipped but settings are old or missing)
+            # This is for projects already unzipped, but whose settings might be old.
+            # New unzips get settings done in unzip_and_process_files.
+        if not pd.isna(row["status_unzip_date"]) and ( # Must be unzipped
+        
+        # Settings Update Check (for existing projects needing only settings refresh)
+        if not pd.isna(row["status_unzip_date"]) and not needs_unzip and ( # Must be unzipped AND not pending a re-unzip
+            pd.isna(row["status_settings_xml_date"])
+            or is_date_older_than(row["status_settings_xml_date"], max_age_days)
+        ):
+            df.loc[index, "pipeline_needs_settings_update"] = True
+
+        # Project VRS Generation Check (if unzipped but project_vrs_generated_date is old or missing)
+        if not pd.isna(row["status_unzip_date"]) and (
+            pd.isna(row["status_project_vrs_generated_date"])
+            or is_date_older_than(row["status_project_vrs_generated_date"], max_age_days)):
+            df.loc[index, "pipeline_needs_project_vrs"] = True
+
+        # SILNLP Prompt Check (if settings are up-to-date but SILNLP not prompted or prompt is old)
+        if not pd.isna(row["status_settings_xml_date"]) and not is_date_older_than(row["status_settings_xml_date"], max_age_days) and \
+           (pd.isna(row["status_silnlp_prompted_date"]) or is_date_older_than(row["status_silnlp_prompted_date"], max_age_days)):
+            df.loc[index, "pipeline_needs_silnlp_prompt"] = True
+
+        # Rename Check (if SILNLP prompted, extract date exists, but rename date is missing/old)
+        # scan_and_update_status should populate status_extract_date if lang-id.txt exists
+        # This check is for after SILNLP step (to be integrated)
+    return df
+
+
+def handle_silnlp_prompting(
+    df_subset: pd.DataFrame, today_str: str
+) -> pd.DataFrame:
+    """Updates status for translations being prompted for SILNLP."""
+    if df_subset.empty:
+        return df_subset
+    logging.info(f"Marking {len(df_subset)} translations as 'SILNLP prompted' for {today_str}.")
+    # Create a copy to avoid SettingWithCopyWarning if df_subset is a slice
+    df_copy = df_subset.copy()
+    for index in df_copy.index:
+        df_copy.loc[index, "status_silnlp_prompted_date"] = today_str
+    return df_copy
+
+
+def download_required_files(df: pd.DataFrame, base_url: str, folder: Path) -> pd.DataFrame:
+    """Downloads files marked with action_needed_download."""
+    translations_to_download = df[df['action_needed_download']]
+    return df
+
+
+def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path, vrs_diffs: Dict) -> pd.DataFrame: 
+def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path) -> pd.DataFrame: 
+    """Unzips, renames, creates settings, and extracts licence for required projects."""
+    translations_to_unzip = df[df['action_needed_unzip']]
+    count = len(translations_to_unzip)
+            try:
+                logging.info(f"Generating project .vrs file for {translation_id}")
+                generate_vrs_from_project(project_dir) # Generate .vrs before writing settings
+                df.loc[index, "status_project_vrs_generated_date"] = TODAY_STR
+            except Exception as e_vrs:
+                logging.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
+                df.loc[index, "status_last_error"] = f"Project VRS generation failed: {e_vrs}"
+                # Continue to attempt settings file write, it might use a fallback or default
+
+            # Write Settings.xml
+             # Unpack all return values, even if old/new dicts aren't used here yet
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code, vrs_diffs)
+            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code) # vrs_diffs removed
+            df.loc[index, 'status_inferred_versification'] = vrs_num # Store the inferred versification number
+            df.loc[index, 'status_settings_xml_date'] = TODAY_STR # Settings.xml was generated today
+
+    projects_folder: Path,
+    private_projects_folder: Path,
+    report_path: Path,
+    vrs_diffs: Dict,
+) -> pd.DataFrame:
+    """
+    Iterates through project folders, regenerates Settings.xml, and updates status_df.
+                    project_vrs_file = project_dir / f"{translation_id}.vrs"
+                    if not project_vrs_file.is_file():
+                        logging.info(f"Generating missing project .vrs file for {translation_id} before settings update.")
+                        generate_vrs_from_project(project_dir) # Generate it now
+                        status_df.loc[status_df["translationId"] == translation_id, "status_project_vrs_generated_date"] = TODAY_STR # type: ignore
+                        try:
+                            generate_vrs_from_project(project_dir) # Generate it now
+                        except Exception as e_vrs_update:
+                            logging.error(f"Error generating project .vrs for {translation_id} during settings update: {e_vrs_update}")
+                            # Continue, write_settings_file might handle missing .vrs with a default
+
+                    logging.info(f"Updating settings for {translation_id} in {project_dir}")
+                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code, vrs_diffs)
+                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code) # vrs_diffs removed
+
+                    if settings_path:
+                        # Use the original DataFrame and integer index to update
+                        status_df.loc[
+                            status_df["translationId"] == translation_id, "status_inferred_versification"
+                        ] = vrs_num # type: ignore
+                        status_df.loc[status_df["translationId"] == translation_id, "status_settings_xml_date"] = TODAY_STR # type: ignore
+
+                        # Add data to report
+                        report_entry: Dict[str, Optional[str]] = {
+    private_projects_folder: Path = base / "private_projects"
+    projects_folder: Path = base / "projects"
+    metadata_folder: Path = base / "metadata"
+    logs_folder: Path = base / "logs"
+
+    # Get vrs_diffs
+    vrs_diffs = get_vrs_diffs()
+    logs_folder: Path = base / "logs" # Define logs_folder earlier
+    
+    # --- Setup Logging ---
+    logs_folder.mkdir(parents=True, exist_ok=True) # Ensure log dir exists first
+            report_path,
+            projects_folder,
+            private_projects_folder,
+            vrs_diffs,
+        )
+        
+        # Save the updated status file
+        print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
+        sys.exit(0)
+
+    # --- Pipeline Mode (Default if no specific mode flags are active) ---
+    is_pipeline_mode = not (args.update_settings or args.rename_extracted) # Simplified for now, add --calculate-hashes later
+    # --- Determine Mode ---
+    is_pipeline_mode = not (args.update_settings or args.rename_extracted) # Add other specific modes here if they are mutually exclusive with pipeline
+
+
+    # --- Scan existing folders to update status if necessary---
+        args.filter
+    )
+
+
+    if filtered_df.empty:
+        logging.info("No translations match the specified filters. Exiting.")
+        # Save status file even if empty? Maybe not necessary.
+        sys.exit(0)
+
+    # --- Determine Actions ---
+    actions_df = determine_actions(
+        filtered_df, max_age_days, args.force_download,
+        downloads_folder, projects_folder, private_projects_folder
+    )
+
+    # --- Execute Actions ---
+    eBible_url: str = r"https://ebible.org/Scriptures/"
+
+    # Download
+    actions_df = download_required_files(actions_df, eBible_url, downloads_folder)
+
+    # Option to stop after download (re-evaluate if needed)
+    if args.download_only:
+        logging.info(f"Stopping after download phase as requested.")
+        # Save status now
+        status_df.update(actions_df) # Update the main df with changes
+        status_df.to_csv(status_path, index=False)
+        logging.info(f"Saved updated status to {status_path}")
+        sys.exit(0)
+
+    # Unzip, Rename, Settings, Licence
+    actions_df = unzip_and_process_files(
+        actions_df, downloads_folder, projects_folder,
+        private_projects_folder, vrs_diffs
+    )
+
+    # Perform licence checks for existing projects if needed
+    actions_df = check_and_update_licences(actions_df)
+
+    # --- Perform post-extraction renaming ---
+    # Pass the full status_df to scan all corpus files and update status directly
+    status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+    
+    # --- Update Main Status DataFrame and Save ---
+    # Use update() which aligns on index (translationId if set, otherwise row number)
+    # Ensure index is set correctly if needed, or update based on 'translationId' column
+    status_df.set_index('translationId', inplace=True, drop=False) # Set index temporarily
+    actions_df.set_index("translationId", inplace=True, drop=False)
+    status_df.update(actions_df)
+    status_df.reset_index(drop=True, inplace=True)  # Remove index before saving
+
+    try:
+        status_df.to_csv(status_path, index=False)
+        logging.info(f"\nSaved updated status for {len(status_df)} translations to {status_path}")
+    except Exception as e:
+        logging.error(f"Error saving status file {status_path}: {e}")
+
+    # --- Perform post-extraction renaming (Run again after save? Maybe not needed if run before save) ---
+    # Renaming is now done before saving the main status_df update.
+    # For pipeline mode, actions_df is derived from filtered_df.
+    # For non-pipeline, it's the same as filtered_df initially.
+    if is_pipeline_mode:
+        logging.info("--- Running in Pipeline Mode ---")
+        # Determine all pipeline actions needed for the filtered set
+        # This actions_df will be a subset of status_df (filtered_df) with new action columns
+        actions_df = determine_actions( # determine_actions now includes pipeline needs
+            filtered_df.copy(), max_age_days, args.force_download,
+            downloads_folder, projects_folder, private_projects_folder
+        )
+
+        eBible_url: str = r"https://ebible.org/Scriptures/"
+
+        # 1. Download
+        if actions_df["action_needed_download"].any():
+            logging.info("Pipeline: Downloading required files...")
+            actions_df = download_required_files(actions_df, eBible_url, downloads_folder)
+            status_df.update(actions_df) 
+            if args.download_only:
+                logging.info("Pipeline: Stopping after download phase as requested.")
+                status_df.to_csv(status_path, index=False)
+                sys.exit(0)
+
+        # 2. Unzip & Process (includes project.vrs, settings.xml, and licence for new unzips)
+        if actions_df["action_needed_unzip"].any():
+            logging.info("Pipeline: Unzipping and processing files...")
+            actions_df = unzip_and_process_files(
+                actions_df, downloads_folder, projects_folder, private_projects_folder
+            )
+            status_df.update(actions_df)
+
+        # 3. Standalone Settings Update (for existing projects needing settings refresh)
+        if actions_df["pipeline_needs_settings_update"].any():
+            logging.info("Pipeline: Updating Settings.xml for relevant existing projects...")
+            settings_to_update_df = actions_df[actions_df["pipeline_needs_settings_update"]].copy()
+            for index, row_to_update in settings_to_update_df.iterrows():
+                project_path = Path(row_to_update["status_unzip_path"])
+                lang_code = row_to_update["languageCode"]
+                # Ensure .vrs is generated if missing before writing settings
+                project_vrs_file_check = project_path / f"{row_to_update['translationId']}.vrs"
+                if not project_vrs_file_check.is_file():
+                    logging.info(f"Pipeline: Generating missing project .vrs for {row_to_update['translationId']} before settings update.")
+                    try:
+                        generate_vrs_from_project(project_path)
+                    except Exception as e_vrs_pipe:
+                        logging.error(f"Pipeline: Error generating project .vrs for {row_to_update['translationId']}: {e_vrs_pipe}")
+                        actions_df.loc[index, "status_last_error"] = f"Pipeline Project VRS failed: {e_vrs_pipe}"
+                        # Continue, write_settings_file might use a default
+
+                if project_path.is_dir() and not pd.isna(lang_code):
+                    try:
+                        s_path, vrs, _, _ = write_settings_file(project_path, lang_code)
+                        if s_path:
+                            actions_df.loc[index, "status_settings_xml_date"] = TODAY_STR
+                            actions_df.loc[index, "status_inferred_versification"] = vrs
+                    except Exception as e_settings_pipe:
+                        logging.error(f"Pipeline: Error writing settings for {row_to_update['translationId']}: {e_settings_pipe}")
+                        actions_df.loc[index, "status_last_error"] = f"Pipeline Settings.xml failed: {e_settings_pipe}"
+            status_df.update(actions_df)
+
+        # 4. Licence update for existing projects (if needed and not part of re-unzip)
+        #    action_needed_licence is set by determine_actions
+        #    We only call check_and_update_licences if not unzipping (unzip handles its own)
+        if actions_df["action_needed_licence"].any() and not actions_df["action_needed_unzip"].any():
+             logging.info("Pipeline: Checking/updating licences for existing projects...")
+             actions_df = check_and_update_licences(actions_df) # This function filters internally
+             status_df.update(actions_df)
+
+        # Placeholder for future SILNLP Integration (Step 5)
+        # Placeholder for Rename Extracted Files (Step 6)
+        # Placeholder for Calculate Hashes (Step 7)
+
+    else: # Not pipeline mode - run individual steps if flags are set (e.g. --rename-extracted)
+        actions_df = filtered_df.copy() # Start with the filtered list
+        if args.rename_extracted:
+            logging.info("--- Running in --rename-extracted mode ---")
+            status_df = rename_extracted_files(status_df, corpus_folder, private_corpus_folder)
+        # Add --calculate-hashes mode here if needed
+    
+    # --- Final Save ---
+    # Ensure all updates from actions_df (if in pipeline mode) are in status_df
+    # Use update() which aligns on index
+    if not actions_df.empty: # Only update if actions_df was populated (e.g. in pipeline mode)
+        status_df.set_index('translationId', inplace=True, drop=False)
+        actions_df.set_index("translationId", inplace=True, drop=False) # Ensure actions_df also has this index
+        status_df.update(actions_df)
+        status_df.reset_index(drop=True, inplace=True)
+
+    try:
+        status_df.to_csv(status_path, index=False)
+        logging.info(f"\nSaved updated status for {len(status_df)} translations to {status_path}")
+    except Exception as e:
+        logging.error(f"Error saving status file {status_path}: {e}")
+
+    # --- Report Missing Extracts ---
+    # Re-scan folders to update status one last time before reporting
+    
+    # --- Final Info ---
+    logging.info("\nLicence Type Summary (Processed Translations):")
+    # Filter actions_df for successfully processed ones if needed, or show all filtered
+    # Handle pandas Series logging
+    licence_counts = actions_df['licence_Licence_Type'].value_counts(dropna=False)
+    logging.info(f"\n{licence_counts.to_string()}")
+    # Use status_df for final summary as it's the most complete
+    # Consider only translations that were attempted in this run (e.g., in filtered_df initially)
+    summary_df = status_df[status_df['translationId'].isin(filtered_df['translationId'])]
+    if not summary_df.empty:
+        licence_counts = summary_df['licence_Licence_Type'].value_counts(dropna=False)
+        logging.info(f"\n{licence_counts.to_string()}")
++    else:
++        logging.info("No translations were processed in this run to summarize licences for.")
++
+ 
+     # --- Print SILNLP Commands ---
+     print_silnlp_commands(logs_folder, log_suffix, private_projects_folder, private_corpus_folder, projects_folder, corpus_folder)
+
+Explanation of Key Changes in this Diff:
+
+STATUS_COLUMNS Corrected:
+
+status_project_vrs_generated_date and status_silnlp_prompted_date have been removed from the STATUS_COLUMNS list.
+determine_actions Simplified:
+
+The logic for setting pipeline_needs_project_vrs and pipeline_needs_silnlp_prompt has been removed, as these are no longer separate tracked pipeline stages.
+The condition for pipeline_needs_settings_update is refined to ensure it applies to projects that are already unzipped and not pending a re-unzip.
+handle_silnlp_prompting Removed:
+
+This function is no longer needed as the pipeline won't be prompting for SILNLP.
+vrs_diffs Removed:
+
+The call to get_vrs_diffs() in main() has been removed.
+The vrs_diffs parameter has been removed from the calls to unzip_and_process_files and update_all_settings. These functions will now rely on settings_file.py using the scoring method (which should already be in place in your settings_file.py from previous updates).
+unzip_and_process_files Updates:
+
+No longer updates status_project_vrs_generated_date.
+Calls write_settings_file without vrs_diffs.
+update_all_settings Updates:
+
+No longer updates status_project_vrs_generated_date.
+Calls write_settings_file without vrs_diffs.
+Correctly updates status_settings_xml_date.
+main() Pipeline Logic Streamlined:
+
+The explicit pipeline step for "Project .VRS Generation" has been removed. Generating the project .vrs file is now handled implicitly:
+Within unzip_and_process_files for newly unzipped projects.
+Within the "Standalone Settings Update" step for existing projects (it checks and generates if missing before calling write_settings_file).
+The explicit pipeline step for "SILNLP Prompt" (and the call to handle_silnlp_prompting) has been removed.
+The call to unzip_and_process_files within the pipeline no longer passes vrs_diffs.
+The final summary for licence types now correctly uses summary_df derived from status_df and filtered_df.
+Important Considerations:
+
+settings_file.py: This diff assumes that your settings_file.py has already been updated as per our previous discussions to use the versification scoring mechanism (i.e., it has get_versification_with_scoring and write_settings_file calls this, and write_settings_file no longer accepts vrs_diffs). If settings_file.py still expects vrs_diffs, you'll encounter errors.
+Testing: After applying this, thoroughly test the script, especially the --update-settings mode and the main pipeline flow for a few test translations, to ensure Settings.xml files are generated correctly with the scored versification.
+This set of changes should bring ebible.py to a consistent state that reflects the intended simplifications and prepares it for the direct integration of SILNLP extraction logic. Let me know if you have any questions while applying this!
+
+Rate this answer: 
+Context Sources (12)
+Prompts to try
+3 context items
+Context items
+
+Current file
+ebible.py
+ebible.py
+ebible_code/ebible_code/...
+Gemini_refactoring7.txt
+ebible_code/assets/...

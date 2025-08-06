@@ -34,24 +34,49 @@ where:
 Blank lines in the Bible text file indicate that the verse is empty in the source Bible. This might be because it hasn't yet been translated and published.
 
 ### Verse Ranges
-If a source Bible contained a verse range, with the text of several verses grouped together, then all of the verse text from the verse range will be found in the Bible text file on the line corresponding to the first verse in the verse range.  For each additional verse in the verse range, the token '&lt;range&gt;' will be found on the corresponding line of the Bible text file.  For example, if a source Bible contained Gen. 1:1-3 as a verse range, then the first 3 lines of its Bible text file will appear as follows:
+Verse ranges occur when several verses grouped together. This happens when translators find it more natural to combine the ideas of several verses or where a verse-by-verse translation is difficult. The text of all the verses in the verse range will be found in the Bible text file on the line corresponding to the first verse of the range.  For each additional verse in the verse range, the token '&lt;range&gt;' will be found on the corresponding line of the Bible text file.  For example, if a source Bible contained Gen. 1:1-3 as a verse range, then the first 3 lines of its Bible text file will appear as follows:
 
     ...verse range text...
     <range>
     <range>
 
-## Regenerating the corpus
-The corpus needs to be regularly regenerated as the data on ebible.org changes over time.
-Regenerating the corpus involves a multi-step process orchestrated by the ebible.py script and SILNLP's `bulk_extract_corpora.py`.
+## What the ebible script does and how to use it.
 
-The `ebible.py` script is run twice:
-1.  **Initial Pass**: Downloads `translations.csv`, downloads translation zip files, unpacks them into project structures, and prepares them for text extraction.
-2.  **SILNLP Extraction**: The `bulk_extract_corpora.py` script from SILNLP is run to extract verse text from the prepared projects.
-3.  **Final Pass**: `ebible.py` is run again to rename the extracted text files to the standard `<translationId>.txt` format and update the `ebible_status.csv` file with the paths to these renamed files and relevant dates.
+Download the translations.csv file from ebible.org to find the list of translations.
+
+Create ebible_status.csv with the information from the translations.csv as a starting point. This file keeps track of the progress of each translation through the 'pipeline'.
+
+Download the zipped translations and unzip them - the unzipped folders each contain a translation project - these are treated as Paratext-format project folders.
+
+Prepare the Project Folders: For each newly downloaded or unzipped translation, the script performs several tasks:
+  a. Rename USFM Files to ensure consistency for subsequent processing. 
+  b. Find the list of chapters and verses that exist in each project as step towards determining the versification used by the translation. These are saved in the metadata folder in a file called compare_versifications.csv.
+  c. Calculate the best versification and use it when writing the Settings.xml for each project. Settings.xml includes important metadata for SIL tools, such as the language code, the versification and the filenaming convention.
+  d. Extract License Information: The script parses the copr.htm file from the project folder and extract copyright statements, Creative Commons license details and save this summary of the licence information in the ebible_status.csv.
+  e. The code should then extract the project data into the vref, or one verse per line, format that is used by SILNLP. This effectively creates a multilingual parallel corpus since every verse from each translation is on the same line number in each text file of the corpus. These output files are placed in the corpus folder (for public data) or to the private_corpus folder (for private data).  
+  
+## ebible_status.csv 
+Throughout all these stages, ebible_status.csv serves as the central ledger. It's continuously updated to reflect:
+
+Dates of various operations (download, unzip, license check, settings file creation, corpus file creation).
+Paths to downloaded zip files, unzipped project folders, and final corpus text files.
+Metadata such as the license details and inferred versification. 
+
+Any errors encountered during the processing of a specific translation, which helps in debugging and allows the script to skip previously failed items on subsequent runs. This status file is crucial for the script's ability to resume processing, avoid redundant work, and manage the workflow.
+
+# Special Operational Mode - Update Settings.
+With the command line option --update-settings ebible.py only updates the Settings.xml file for each project.
+When run in this mode ebible.py: 
+It bypasses the download, unzip, and full processing pipeline. Instead, it iterates through all existing project folders (both public and private). 
+For each project, it regenerates the Settings.xml file (and the associated project-specific .vrs file if it's missing or needs an update). This is useful for applying new logic for versification scoring or other settings changes across all previously processed translations.
+It updates ebible_status.csv with the new settings file date and any changed versification information.
+A report detailing the changes made to settings files (settings_update.csv) is generated.
+The script then prints the SILNLP commands and exits.
+
 
 To run it:
 ```
-poetry run python ebible_data/ebible_status.py
+poetry run python ebible_code/ebible.py
 ```
 
 EBIBLE_DATA_DIR should be set in the .env file and point to a folder containing a local copy of the eBIBLE_data repo. If required folders are missing then the script create a directory structure in EBIBLE_DATA_DIR as follows:

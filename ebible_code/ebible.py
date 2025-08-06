@@ -18,16 +18,27 @@ Workflow:
 import argparse
 import os
 import shutil
-import logging # Import logging
+import logging
 import sys
-from contextlib import ExitStack # Potentially needed for extract_scripture_corpus if used directly
+import xxhash
 
 # --- CONFIGURE LOGGING before importing from settings_file ---
-log_format = '%(name)s - %(levelname)s - %(message)s'
-logging.basicConfig(level=logging.DEBUG, format=log_format)
+
+# Mapping from string names to logging levels
+LOG_LEVELS = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+    'ERROR': logging.ERROR,
+    'CRITICAL': logging.CRITICAL
+}
+
+# Get level from environment variable, default to INFO
+env_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+log_level = LOG_LEVELS.get(env_level, logging.INFO) # Default to INFO if env var is invalid
+
+logging.basicConfig(level=log_level, format='%(name)s - %(levelname)s - %(message)s')
 root_logger = logging.getLogger() # Get root logger
-root_logger.setLevel(logging.INFO) # Set minimum level to capture
-root_logger.debug("Set DEBUG message level")
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -71,15 +82,14 @@ ORIGINAL_COLUMNS = [
     "sourceDate"
 ]
 
-
 STATUS_COLUMNS = [
     "status_download_path", "status_download_date", "status_unzip_path",
-    "status_unzip_date", "status_settings_xml_date", # Settings.xml creation date
-    "status_extract_path", "status_extract_date", # For internally extracted and finalized text
-    "status_last_error", "status_inferred_versification"
+    "status_unzip_date", "status_inferred_versification", "status_settings_xml_date",
+    "status_extract_path", "status_extract_date", "status_extract_hash", "status_extract_hash_date",
+    "wildebeest_hash",  "wildebeest_hash_date", "status_last_error", 
 ]
 
-# Add new licence tracking columns
+
 LICENCE_COLUMNS = [
     "licence_ID", "licence_File", "licence_Language", "licence_Dialect",
     "licence_Vernacular_Title", "licence_Licence_Type", "licence_Licence_Version",
@@ -415,7 +425,7 @@ def ensure_extract_paths(
     return status_df
 
 
-def filter_translations(df: pd.DataFrame, allow_non_redistributable: bool, verse_threshold: int, regex_filter: Optional[str]) -> pd.DataFrame:
+def filter_translations(df: pd.DataFrame, args: argparse.Namespace, test_base_dir_path: Optional[Path]) -> pd.DataFrame:
     """Filters the DataFrame based on criteria."""
     initial_count = len(df)
     logging.info(f"Initial translations in status file: {initial_count}")
@@ -427,38 +437,80 @@ def filter_translations(df: pd.DataFrame, allow_non_redistributable: bool, verse
     df = df[df['status_last_error'].isna() | (df['status_last_error'] == '')]
 
     # 1. Filter by downloadable flag
-    df = df[df['downloadable'] == True]
+    df = df[df['downloadable'] == True].copy() # Use .copy() to avoid SettingWithCopyWarning
     logging.info(f"Translations after 'downloadable' filter: {len(df)}")
 
     # 2. Filter by redistributable flag (if applicable)
-    if not allow_non_redistributable:
-        df = df[df['Redistributable'] == True]
+    if not args.allow_non_redistributable:
+        df = df[df['Redistributable'] == True].copy()
         logging.info(f"Translations after 'Redistributable' filter: {len(df)}")
 
     # 3. Filter by verse count
-    df = df[(df['OTverses'] + df['NTverses']) >= verse_threshold]
-    logging.info(f"Translations after verse count filter (>= {verse_threshold}): {len(df)}")
+    df = df[(df['OTverses'] + df['NTverses']) >= args.verse_threshold].copy()
+    logging.info(f"Translations after verse count filter (>= {args.verse_threshold}): {len(df)}")
 
-    # 4. Apply regex filter (if provided)
-    if regex_filter:
+    # 4. Apply test mode filter OR regex filter
+    if args.test:
+        if not test_base_dir_path:
+            logging.error("TEST MODE: test_base_dir_path not provided to filter_translations. Cannot load test_projects.txt.")
+            return pd.DataFrame() # Return empty DataFrame
+
+        test_projects_file = test_base_dir_path / "metadata" / "test_projects.txt"
+        if args.filter:
+            logging.warning(f"TEST MODE: --filter argument '{args.filter}' is ignored when --test is active and test_projects.txt is used.")
+        
+        if test_projects_file.is_file():
+            try:
+                with open(test_projects_file, "r", encoding="utf-8") as f:
+                    test_ids = {line.strip() for line in f if line.strip()}
+                if test_ids:
+                    logging.info(f"TEST MODE: Filtering by {len(test_ids)} translationIds from {test_projects_file}")
+                    df = df[df['translationId'].isin(test_ids)].copy()
+                else:
+                    logging.warning(f"TEST MODE: {test_projects_file} is empty. No test-specific ID filter applied.")
+            except Exception as e:
+                logging.error(f"TEST MODE: Error reading {test_projects_file}: {e}. No test-specific ID filter applied.")
+        else:
+            logging.warning(f"TEST MODE: {test_projects_file} not found. No test-specific ID filter applied. Create it to specify test projects.")
+        
+        logging.info(f"TEST MODE: Translations after test_projects.txt filter (if applied): {len(df)}")
+
+    elif args.filter: # Only apply regex_filter if not in test mode (or if test_projects.txt was not used/found)
         try:
-            df = df[df['translationId'].astype(str).str.match(regex_filter, na=False)]
-            logging.info(f"Translations after regex filter ('{regex_filter}'): {len(df)}")
+            df = df[df['translationId'].astype(str).str.match(args.filter, na=False)].copy()
+            logging.info(f"Translations after regex filter ('{args.filter}'): {len(df)}")
         except regex.error as e:
-            logging.error(f"Invalid regex filter '{regex_filter}': {e}. Skipping filter.")
+            logging.error(f"Invalid regex filter '{args.filter}': {e}. Skipping filter.")
 
     final_count = len(df)
     logging.info(f"Filtered down to {final_count} translations to process.")
     return df
 
 
-def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path) -> pd.DataFrame:
+def calculate_file_hash(file_path: Path) -> Optional[str]:
+    """Calculates the xxhash of a file."""
+    if not file_path.is_file():
+        return None
+    try:
+        h = xxhash.xxh64()
+        with open(file_path, "rb") as f:
+            # Read in chunks to handle large files efficiently
+            while chunk := f.read(8192):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception as e:
+        logging.error(f"Error calculating hash for {file_path}: {e}")
+        return None
+
+def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool, hash_for_changes: bool, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path) -> pd.DataFrame:
     """Adds boolean columns indicating required actions."""
 
     df['action_needed_download'] = False
     df['action_needed_unzip'] = False
     df['action_needed_licence'] = False
     df['action_needed_extract'] = False # New action for internal extraction
+    df['action_needed_extract_hash'] = False 
+    df['action_needed_wildebeest_hash'] = False
 
     for index, row in df.iterrows():
         # --- Download Check ---
@@ -513,6 +565,19 @@ def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool,
         
         df.loc[index, 'action_needed_extract'] = needs_extract
 
+        # --- Extract Hash Calculation Check (Normal Mode) ---
+        needs_extract_hash = False
+        if not hash_for_changes: # Only in normal mode
+            if needs_extract: # If file was just (re)extracted
+                needs_extract_hash = True
+            elif pd.isna(row['status_extract_hash']): # Or if hash is missing
+                # And the extract file actually exists
+                if not pd.isna(row['status_extract_path']) and Path(row['status_extract_path']).is_file():
+                    needs_extract_hash = True
+        df.loc[index, 'action_needed_extract_hash'] = needs_extract_hash
+
+        # --- Wildebeest Hash Calculation Check ---
+        df.loc[index, 'action_needed_wildebeest_hash'] = True if hash_for_changes else False
     return df
 
 
@@ -600,7 +665,6 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
             try:
                 logging.info(f"Generating project .vrs file for {translation_id}")
                 generate_vrs_from_project(project_dir)
-                # df.loc[index, "status_project_vrs_generated_date"] = TODAY_STR # This status column might be removed later
             except Exception as e_vrs:
                 logging.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
                 df.loc[index, "status_last_error"] = f"Project VRS generation failed: {e_vrs}"
@@ -999,6 +1063,82 @@ def update_all_settings(
     return status_df
 
 
+def calculate_hashes(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculates wildebeest_hash for files marked with action_needed_wildebeest_hash."""
+    # This function is dedicated to wildebeest_hash for --hash-for-changes mode
+    translations_to_hash = df[df['action_needed_wildebeest_hash']] 
+    count = len(translations_to_hash)
+    if count == 0:
+        logging.info("No files require wildebeest_hash calculation.")
+        return df
+
+    logging.info(f"Attempting to calculate wildebeest_hash for {count} files...")
+
+    hashed_count = 0
+    for index, row in tqdm(translations_to_hash.iterrows(), total=count, desc="Calculating Wildebeest Hashes"):
+        translation_id = row['translationId']
+        extract_path_str = row['status_extract_path']
+
+        if pd.isna(extract_path_str) or not Path(extract_path_str).is_file():
+            logging.warning(f"Skipping hash for {translation_id}: No valid extract path found or file missing.")
+            df.loc[index, 'status_last_error'] = "Hash skipped: Missing extract file"
+            continue
+
+        extract_file_path = Path(extract_path_str)
+        file_hash = calculate_file_hash(extract_file_path)
+
+        if file_hash:
+            df.loc[index, 'wildebeest_hash'] = file_hash
+            df.loc[index, 'wildebeest_hash_date'] = TODAY_STR
+            
+            # Keep previous error if it wasn't related to hashing
+            if "Hash skipped" in str(df.loc[index, 'status_last_error']): # type: ignore
+                 df.loc[index, 'status_last_error'] = np.nan # type: ignore
+            hashed_count += 1
+        else:
+            df.loc[index, 'wildebeest_hash'] = np.nan # type: ignore
+            df.loc[index, 'wildebeest_hash_date'] = np.nan # type: ignore
+            df.loc[index, 'status_last_error'] = f"Wildebeest hash calculation failed for {extract_file_path}"
+
+    logging.info(f"Finished wildebeest_hash calculation. Successfully hashed {hashed_count}/{count} files.")
+    return df
+
+
+def calculate_extract_hashes(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculates status_extract_hash for files marked with action_needed_extract_hash."""
+    translations_to_hash = df[df['action_needed_extract_hash']]
+    count = len(translations_to_hash)
+    if count == 0:
+        logging.info("No files require extract hash (status_extract_hash) calculation.")
+        return df
+
+    logging.info(f"Attempting to calculate extract hash (status_extract_hash) for {count} files...")
+    hashed_count = 0
+    
+    pbar = tqdm(translations_to_hash.iterrows(), total=count, desc="Calculating Extract Hashes")
+    for index, row in pbar:
+        translation_id = row['translationId']
+        extract_path_str = row['status_extract_path']
+        pbar.set_description_str(f"Calculating Extract Hashes: {translation_id}")
+
+        if pd.isna(extract_path_str) or not Path(extract_path_str).is_file():
+            logging.warning(f"Skipping extract hash for {translation_id}: No valid extract path or file missing.")
+            continue
+
+        extract_file_path = Path(extract_path_str)
+        file_hash = calculate_file_hash(extract_file_path)
+
+        if file_hash:
+            df.loc[index, 'status_extract_hash'] = file_hash
+            df.loc[index, 'status_extract_hash_date'] = TODAY_STR
+            df.loc[index, 'status_last_error'] = np.nan # type: ignore # Clear error on success
+            hashed_count += 1
+        else:
+            logging.warning(f"Extract hash (status_extract_hash) calculation failed for {translation_id}")
+            df.loc[index, 'status_last_error'] = f"Extract hash calculation failed for {extract_file_path}"
+    
+    logging.info(f"Finished extract hash (status_extract_hash) calculation. Successfully hashed {hashed_count}/{count} files.")
+    return df
 
 def main() -> None:
     load_dotenv()
@@ -1028,10 +1168,6 @@ def main() -> None:
         help="Max age in days for downloaded/unzipped files before re-processing. Overrides .env.",
     )
     parser.add_argument(
-        "--base-folder", default=None,
-        help="Override base folder location (defaults to EBIBLE_DATA_DIR from .env or './_ebible_data').",
-    )
-    parser.add_argument(
         "--verse-threshold", default=400, type=int,
         help="Minimum total OT+NT verses required for a translation to be processed.",
     )
@@ -1039,17 +1175,34 @@ def main() -> None:
         "--update-settings", default=False, action="store_true",
         help="Run in a mode to only update Settings.xml for existing projects and exit.",
     )
+    parser.add_argument(
+        "--test", action="store_true",
+        help="Run in test mode. Uses TEST_EBIBLE_DATA_DIR from .env and processes a predefined small set of translations."
+    )
+    parser.add_argument(
+        "--hash-for-changes", default=False, action="store_true",
+        help="Run in a mode to only update 'wildebeest_hash'. Use to check whether extracts have been modified.",
+    )
+    
     args: argparse.Namespace = parser.parse_args()
+    test_base_dir_path_for_filter: Optional[Path] = None # For passing to filter_translations
 
     # --- Determine Base Path ---
-    if args.base_folder:
-        base = Path(args.base_folder).resolve()
-        print(f"Using base folder from command line: {base}")
-    elif os.getenv("EBIBLE_DATA_DIR"):
-        base = Path(os.getenv("EBIBLE_DATA_DIR")).resolve()
-        print(f"Using base folder from EBIBLE_DATA_DIR env var: {base}")
-    else:
-        raise RuntimeError("Can't determine the location of the eBible Data folder.")
+    if args.test:
+        test_base_dir_env = os.getenv("TEST_EBIBLE_DATA_DIR")
+        if not test_base_dir_env:
+            logging.critical("Error: --test mode active but TEST_EBIBLE_DATA_DIR not set in .env file.")
+            sys.exit(1)
+        test_base_dir_path_for_filter = Path(test_base_dir_env).resolve() # Store for filter_translations
+        base = test_base_dir_path_for_filter # Use the same resolved path for 'base'
+        logging.info(f"Running in TEST mode. Using base folder: {base}")
+    else: # Production mode
+        prod_base_dir_env = os.getenv("EBIBLE_DATA_DIR")
+        if not prod_base_dir_env:
+            logging.critical("Error: EBIBLE_DATA_DIR not set in .env file (and not in --test mode).")
+            sys.exit(1)
+        base = Path(prod_base_dir_env).resolve()
+        logging.info(f"Using base folder from EBIBLE_DATA_DIR: {base}")
         
     # --- Define Paths ---
     corpus_folder: Path = base / "corpus"
@@ -1144,20 +1297,23 @@ def main() -> None:
     # --- Filter Translations ---
     filtered_df = filter_translations(
         status_df,
-        args.allow_non_redistributable,
-        args.verse_threshold,
-        args.filter
+        args, # Pass all args
+        test_base_dir_path_for_filter # Pass the test base path if in test mode
     )
 
     if filtered_df.empty:
         logging.info("No translations match the specified filters. Exiting.")
         # Save status file even if empty? Maybe not necessary.
         # filtered_df.to_csv(status_path, index=False)
+        # The warning for test mode is now handled inside filter_translations if test_projects.txt leads to empty.
+        # We can add a general one here too if needed.
+        if args.test and not (test_base_dir_path_for_filter / "metadata" / "test_projects.txt").is_file(): # type: ignore
+            logging.warning(f"TEST MODE: No 'test_projects.txt' found in {test_base_dir_path_for_filter / 'metadata'}. Combined with other filters, this resulted in no translations.") # type: ignore
         sys.exit(0)
 
     # --- Determine Actions ---
     actions_df = determine_actions(
-        filtered_df, max_age_days, args.force_download,
+        filtered_df, max_age_days, args.force_download, args.hash_for_changes,
         downloads_folder, projects_folder, private_projects_folder
     )
 
@@ -1192,6 +1348,16 @@ def main() -> None:
         private_corpus_folder
     )
 
+    # --- Calculate Hashes ---
+    if args.hash_for_changes:
+        logging.info("Running in --hash-for-changes mode. Calculating/Updating 'wildebeest_hash'.")
+        actions_df = calculate_hashes(actions_df) # This is the wildebeest hash function
+    else:
+        # In normal mode, calculate extract hashes if missing or file was re-extracted
+        logging.info("Running in normal mode. Calculating/Updating 'status_extract_hash' if needed.")
+        actions_df = calculate_extract_hashes(actions_df)
+
+
     # --- Update Main Status DataFrame and Save ---
     # Use update() which aligns on index (translationId if set, otherwise row number)
     # Ensure index is set correctly if needed, or update based on 'translationId' column
@@ -1209,10 +1375,18 @@ def main() -> None:
     # --- Report Missing Extracts ---
     # Re-scan folders to update status one last time before reporting
     status_df = scan_and_update_status(status_df, downloads_folder, projects_folder, private_projects_folder, corpus_folder, private_corpus_folder)
+    
+    # Determine the scope for reporting missing extracts
+    # If in test mode, we only care about missing extracts for the projects that were part of the test run.
+    # Otherwise, we consider all projects in the main status_df that meet general criteria.
+    if args.test:
+        # In test mode, missing_extracts_df should only consider projects from the filtered_df (test set)
+        # that are now found to be missing their extract after all processing.
+        report_scope_df = status_df[status_df['translationId'].isin(filtered_df['translationId'])]
+    else:
+        report_scope_df = status_df
 
-    missing_extracts_df = status_df[status_df['status_extract_date'].isna() & status_df['downloadable'] & ((status_df['OTverses'] + status_df['NTverses']) >= args.verse_threshold)]
-    # Apply filters again if needed, or assume we only care about potentially processable ones
-    # missing_extracts_df = filter_translations(missing_extracts_df, args.allow_non_redistributable, args.verse_threshold, args.filter, ) # Re-filter if strict reporting needed
+    missing_extracts_df = report_scope_df[report_scope_df['status_extract_date'].isna() & report_scope_df['downloadable'] & ((report_scope_df['OTverses'] + report_scope_df['NTverses']) >= args.verse_threshold)]
 
     if not missing_extracts_df.empty:
         logging.warning(f"\n{len(missing_extracts_df)} translations appear to be missing extracted corpus files (.txt):")

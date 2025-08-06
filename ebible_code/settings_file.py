@@ -10,7 +10,7 @@ from datetime import datetime
 import re
 
 from machine.corpora import ParatextTextCorpus
-from machine.scripture import Versification, VersificationType, book_id_to_number
+from machine.scripture import Versification, VersificationType, book_id_to_number, book_number_to_id
 
 #import machine.scripture
 #print(f"DEBUG: machine.scripture is loaded from: {machine.scripture.__file__}")
@@ -130,10 +130,14 @@ def add_settings_file(project_folder: Path, language_code: str) -> None:
 def get_verse_data_from_vrs_obj(vrs_obj: Optional[Versification]) -> Dict[Tuple[str, int], int]:
     """Extracts {(book_id_str, chapter_num_int): max_verse_num_int} from a Versification object."""
     data: Dict[Tuple[str, int], int] = {}
+    #print(f"DEBUG: vrs_obj is {vrs_obj}" , vrs_obj type is {type(vrs_obj)}")
+    #print(f"DEBUG: vrs_obj.get_last_book() is {vrs_obj.get_last_book() if vrs_obj else 'None'}")
+    #exit()
     if not vrs_obj:
         return data # type: ignore
     for book_num_int in range(1, vrs_obj.get_last_book() + 1):
-        book_id_str = book_id_to_number(book_num_int) # machine.scripture.book_id_to_number
+        book_id_str = book_number_to_id(book_num_int)
+        #print(f"DEBUG: book_num_int={book_num_int}, book_id_str={book_id_str}")
         if not book_id_str or book_id_str == "UNKNOWN": # Check for valid book ID
             continue
         for chapter_num_int in range(1, vrs_obj.get_last_chapter(book_num_int) + 1):
@@ -360,7 +364,8 @@ def generate_vrs_from_project(project_path: Path) -> Optional[Path]:
         default_vrs_for_parsing = Versification.get_builtin(VersificationType.ENGLISH)
 
         # Since all the projects are from eBible.org, they all have the same ".SFM" extension.
-        corpus = UsfmFileTextCorpus(str(project_path), file_pattern="*.SFM", versification=default_vrs_for_parsing).union(UsfmFileTextCorpus(str(project_path), file_pattern="*.SFM", versification=default_vrs_for_parsing))
+        corpus = UsfmFileTextCorpus(str(project_path), file_pattern="*.SFM", versification=default_vrs_for_parsing)
+        
     except Exception as e: # Catching generic Exception here might be too broad; consider more specific exceptions from ParatextTextCorpus
         logger.error(f"Could not initialize UsfmFileTextCorpus for {project_name}: {e}")
         return None
@@ -374,6 +379,7 @@ def generate_vrs_from_project(project_path: Path) -> Optional[Path]:
         verse_ref = text_row.ref # Get the VerseRef from the TextRow
         
         book_id = verse_ref.book.upper() # Ensure uppercase book ID
+
         chapter_num = int(verse_ref.chapter) # Convert chapter to int
         
         # verse_ref.verse can be like '1', '1a', '1-2'. We need the primary numeric part.

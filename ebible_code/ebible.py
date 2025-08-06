@@ -20,8 +20,7 @@ import os
 import shutil
 import logging
 import sys
-from contextlib import ExitStack # Potentially needed for extract_scripture_corpus if used directly
-import xxhash # For calculating file hashes
+import xxhash
 
 # --- CONFIGURE LOGGING before importing from settings_file ---
 

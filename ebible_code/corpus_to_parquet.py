@@ -154,6 +154,12 @@ def main():
         print(f"After extraction status validation: {len(filtered_df)} translations ready for processing.")
         print(f"Silently skipped {sum(both_empty)} translations (not extracted).")
         print(f"Found {len(extraction_warnings)} translations with incomplete extraction status.")
+        
+        # Display specific warning messages for incomplete extraction status
+        if extraction_warnings:
+            print("\n--- Extraction Status Warnings ---")
+            for warning in extraction_warnings:
+                print(f"Warning: {warning}", file=sys.stderr)
 
     except FileNotFoundError:
         print(f"Error: Metadata file not found at {metadata_path}", file=sys.stderr)
@@ -299,6 +305,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

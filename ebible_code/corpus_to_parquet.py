@@ -186,7 +186,7 @@ def main():
             skipped_translations.append({
                 'id': translation_id,
                 'path': str(text_file_path),
-                'reason': 'File not found'
+                'reason': 'Expected file missing (extraction marked complete but file not found)'
             })
             continue
 
@@ -299,6 +299,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

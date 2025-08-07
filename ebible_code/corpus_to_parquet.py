@@ -179,7 +179,10 @@ def main():
              text_file_path = ebible_data_dir / text_file_path
 
         if not text_file_path.exists():
-            print(f"Warning: Text file not found for {translation_id}, skipping: {text_file_path}", file=sys.stderr)
+            # This should not happen since we filtered for complete extraction status earlier
+            # If we reach here, it means both status_extract_date and status_extract_hash are populated
+            # but the file is missing - this indicates a data integrity issue
+            print(f"Error: Expected extracted file not found for {translation_id} (extraction status indicates complete): {text_file_path}", file=sys.stderr)
             skipped_translations.append({
                 'id': translation_id,
                 'path': str(text_file_path),
@@ -296,5 +299,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 

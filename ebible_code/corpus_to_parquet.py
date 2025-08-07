@@ -123,7 +123,37 @@ def main():
         filtered_df = filtered_df.dropna(subset=['status_extract_path'])
         filtered_df = filtered_df[filtered_df['status_extract_path'] != '']
 
-        print(f"Processing {len(filtered_df)} translations after filtering.")
+        # 5. Check extraction completion status
+        extraction_warnings = []
+        pre_extraction_count = len(filtered_df)
+        
+        # Create boolean masks for extraction status
+        has_extract_date = filtered_df['status_extract_date'].notna() & (filtered_df['status_extract_date'] != '')
+        has_extract_hash = filtered_df['status_extract_hash'].notna() & (filtered_df['status_extract_hash'] != '')
+        
+        # Case 1: Both fields empty - skip silently (not extracted)
+        both_empty = ~has_extract_date & ~has_extract_hash
+        
+        # Case 2: Only one field populated - add to warnings list
+        only_date = has_extract_date & ~has_extract_hash
+        only_hash = ~has_extract_date & has_extract_hash
+        
+        # Case 3: Both fields populated - proceed with processing
+        both_populated = has_extract_date & has_extract_hash
+        
+        # Collect warnings for incomplete extraction status
+        for idx, row in filtered_df[only_date].iterrows():
+            extraction_warnings.append(f"For translation {row['translationId']} the ebible_status file contains a status_extract_date without a status_extract_hash")
+        
+        for idx, row in filtered_df[only_hash].iterrows():
+            extraction_warnings.append(f"For translation {row['translationId']} the ebible_status file contains a status_extract_hash without a status_extract_date")
+        
+        # Filter to only include translations with complete extraction status
+        filtered_df = filtered_df[both_populated].copy()
+        
+        print(f"After extraction status validation: {len(filtered_df)} translations ready for processing.")
+        print(f"Silently skipped {sum(both_empty)} translations (not extracted).")
+        print(f"Found {len(extraction_warnings)} translations with incomplete extraction status.")
 
     except FileNotFoundError:
         print(f"Error: Metadata file not found at {metadata_path}", file=sys.stderr)
@@ -266,4 +296,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

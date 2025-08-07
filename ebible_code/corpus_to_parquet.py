@@ -102,7 +102,7 @@ def main():
 
         # --- Filtering ---
         # 1. Check required columns exist
-        required_cols = ['translationId', 'status_extract_path', 'Redistributable']
+        required_cols = ['translationId', 'status_extract_path', 'Redistributable', 'status_extract_date', 'status_extract_hash']
         missing_cols = [col for col in required_cols if col not in metadata_df.columns]
         if missing_cols:
             print(f"Error: Metadata CSV missing required columns: {', '.join(missing_cols)}", file=sys.stderr)
@@ -266,3 +266,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

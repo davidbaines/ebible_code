@@ -59,7 +59,7 @@ def main():
         "HUGGINGFACE_MAIN_PARQUET_FILENAME"
     )
     hf_metadata_parquet_file = hf_output_dir / os.getenv(
-        "HUGGINGFACE_METADATE_PARQUET_FILENAME"
+        "HUGGINGFACE_METADATA_PARQUET_FILENAME"
     )
 
     print(f"Using EBIBLE_DATA_DIR:           {ebible_data_dir}")

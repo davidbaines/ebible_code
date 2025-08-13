@@ -33,12 +33,18 @@ LOG_LEVELS = {
     'CRITICAL': logging.CRITICAL
 }
 
-# Get level from environment variable, default to INFO
+from dotenv import load_dotenv
+load_dotenv()
+
+# Get level from environment variable, default to WARNING
 env_level = os.getenv('LOG_LEVEL', 'INFO').upper()
-log_level = LOG_LEVELS.get(env_level, logging.INFO) # Default to INFO if env var is invalid
+print(f"Using log level: {env_level}") # Debugging log level selection
+
+log_level = LOG_LEVELS.get(env_level, logging.WARNING) # Default to WARNING if env var is invalid
 
 logging.basicConfig(level=log_level, format='%(name)s - %(levelname)s - %(message)s')
 root_logger = logging.getLogger() # Get root logger
+root_logger.setLevel(log_level)
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -52,7 +58,6 @@ import regex
 import requests
 from bs4 import BeautifulSoup
 from machine.corpora import ParatextTextCorpus, create_versification_ref_corpus, extract_scripture_corpus
-from dotenv import load_dotenv
 from rename_usfm import get_destination_file_from_book
 from settings_file import generate_vrs_from_project, write_settings_file 
 from tqdm import tqdm
@@ -115,13 +120,13 @@ def download_url_to_file(url: str, file: Path, headers: Dict = headers) -> bool:
             out_file.write(r.content)
         return True
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error downloading {url}: {e}")
+        root_logger.error(f"Error downloading {url}: {e}")
         # Clean up potentially incomplete file
         if file.exists():
             try:
                 file.unlink()
             except OSError as unlink_e:
-                 logging.error(f"Error removing incomplete download {file}: {unlink_e}")
+                 root_logger.error(f"Error removing incomplete download {file}: {unlink_e}")
         return False
 
 
@@ -160,25 +165,25 @@ def check_folders_exist(folders: list, base: Path):
     """Checks if required folders exist, prompts to create if missing."""
     missing_folders: List[Path] = [folder for folder in folders if not folder.is_dir()]
 
-    logging.info(f"The base folder is : {base}")
+    root_logger.info(f"The base folder is : {base}")
 
     if missing_folders:
-        logging.info(
+        root_logger.info(
             f"\nThe following {len(missing_folders)} folders are required but missing:"
         )
         for folder in missing_folders:
-            logging.info(folder)
+            root_logger.info(folder)
 
-        logging.info(f"\nBase folder check:    {base} ")
+        root_logger.info(f"\nBase folder check:    {base} ")
         if choose_yes_no("Create missing folders and continue? (Y/N): "):
             make_directories(missing_folders)
-            logging.info(f"Created required folders within {base}\n")
+            root_logger.info(f"Created required folders within {base}\n")
         else:
             print("Aborting script.")
             sys.exit() # Use sys.exit for clarity
     else:
         # Log that folders exist
-        logging.info(f"All required folders exist in {base}")
+        root_logger.info(f"All required folders exist in {base}")
 
 
 # --- Scanning Functions for Existing Data ---
@@ -240,7 +245,7 @@ def scan_corpus_file(extract_path: Path) -> Optional[tuple[str, str]]:
 def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.DataFrame:
     """Loads the status CSV, or creates it from the translations CSV if it doesn't exist."""
     if status_path.exists():
-        logging.info(f"Loading existing status file: {status_path}")
+        root_logger.info(f"Loading existing status file: {status_path}")
         try:
             status_df = pd.read_csv(status_path, keep_default_na=False, na_values=['']) # Treat empty strings as NA
             # Verify essential columns exist
@@ -254,12 +259,12 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
                 # The new 'status_extract_path' will be for the final file.
                 # This migration is a bit tricky as paths also change.
                 # For simplicity, we'll prioritize new columns. Users might need to reprocess for full path accuracy if migrating.
-                logging.info("Detected 'status_extract_renamed_date'. Will prioritize new 'status_extract_date' if populated during scan/processing.")
+                root_logger.info("Detected 'status_extract_renamed_date'. Will prioritize new 'status_extract_date' if populated during scan/processing.")
 
             # Add any missing columns with default NaN values
             for col in ALL_STATUS_COLUMNS:
                 if col not in status_df.columns:
-                    logging.info(f"Adding missing column '{col}' to status DataFrame.")
+                    root_logger.info(f"Adding missing column '{col}' to status DataFrame.")
                     status_df[col] = np.nan
             
             # Ensure correct order
@@ -267,14 +272,14 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
             status_df = status_df[[col for col in ALL_STATUS_COLUMNS if col in status_df.columns]]
 
         except Exception as e:
-            logging.error(f"Error loading status file {status_path}: {e}. Attempting to rebuild.")
+            root_logger.error(f"Error loading status file {status_path}: {e}. Attempting to rebuild.")
             status_path.unlink(missing_ok=True) # Remove corrupted file
             return initialize_or_load_status(status_path, translations_path) # Recurse to rebuild
 
     else:
-        logging.info(f"Status file not found. Creating new one: {status_path}")
+        root_logger.info(f"Status file not found. Creating new one: {status_path}")
         if not translations_path.exists():
-            logging.critical(f"Error: translations file missing at {translations_path}. Cannot create status file.")
+            root_logger.critical(f"Error: translations file missing at {translations_path}. Cannot create status file.")
             sys.exit(1)
         try:
             # Read translations, ensuring 'translationId' is string
@@ -290,7 +295,7 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
                 if col in trans_df.columns:
                     status_df[col] = trans_df[col]
                 else:
-                    logging.warning(f"Column '{col}' not found in {translations_path}")
+                    root_logger.warning(f"Column '{col}' not found in {translations_path}")
                     status_df[col] = np.nan # Add as empty column if missing
 
             # Initialize new status/licence columns with NaN
@@ -301,7 +306,7 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
             # status_df.set_index('translationId', inplace=True) # Let's keep it as a column for now
 
         except Exception as e:
-            logging.critical(f"Error creating status file from {translations_path}: {e}")
+            root_logger.critical(f"Error creating status file from {translations_path}: {e}")
             sys.exit(1)
 
     # --- Merge upstream changes (optional but recommended) ---
@@ -317,7 +322,7 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
         new_ids = list(upstream_ids - existing_ids)
 
         if new_ids:
-            logging.info(f"Found {len(new_ids)} new translations in {translations_path}. Adding to status.")
+            root_logger.info(f"Found {len(new_ids)} new translations in {translations_path}. Adding to status.")
             new_rows_df = trans_df[trans_df['translationId'].isin(new_ids)].copy()
 
             # Prepare new rows with all status columns, initializing non-original ones
@@ -336,12 +341,12 @@ def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.
 
         removed_ids = list(existing_ids - upstream_ids)
         if removed_ids:
-            logging.warning(f"{len(removed_ids)} translations exist in status but not in upstream {translations_path}. They will be kept but may be outdated.")
+            root_logger.warning(f"{len(removed_ids)} translations exist in status but not in upstream {translations_path}. They will be kept but may be outdated.")
             # Optionally, mark them as inactive or remove them:
             # status_df = status_df[~status_df['translationId'].isin(removed_ids)]
 
     except Exception as e:
-        logging.error(f"Error merging upstream changes from {translations_path}: {e}")
+        root_logger.error(f"Error merging upstream changes from {translations_path}: {e}")
 
     # Ensure data types are reasonable (especially for boolean checks later)
     status_df['Redistributable'] = status_df['Redistributable'].astype(str).str.lower() == 'true'
@@ -361,7 +366,7 @@ def scan_and_update_status(
     private_corpus_folder: Path
 ) -> pd.DataFrame:
     """Scans data folders to update status DataFrame for entries with missing info."""
-    logging.info("Scanning existing data folders to update status file...")
+    root_logger.info("Scanning existing data folders to update status file...")
     updated_count = 0
     for index, row in tqdm(status_df.iterrows(), total=len(status_df), desc="Scanning Folders"):
         translation_id = row['translationId']
@@ -401,9 +406,9 @@ def scan_and_update_status(
                 updated_count += 1
 
     if updated_count > 0:
-        logging.info(f"Scan complete. Updated status for {updated_count} entries based on existing files.")
+        root_logger.info(f"Scan complete. Updated status for {updated_count} entries based on existing files.")
     else:
-        logging.info("Scan complete. No missing status information updated from existing files.")
+        root_logger.info("Scan complete. No missing status information updated from existing files.")
 
     return status_df
 
@@ -414,7 +419,7 @@ def ensure_extract_paths(
     private_corpus_folder: Path
 ) -> pd.DataFrame:
     """Calculates and fills the status_extract_path column if missing."""
-    logging.info("Ensuring status_extract_path is populated...")
+    root_logger.info("Ensuring status_extract_path is populated...")
     for index, row in status_df.iterrows():
         if pd.isna(row['status_extract_path']):
             translation_id = row['translationId']
@@ -428,62 +433,62 @@ def ensure_extract_paths(
 def filter_translations(df: pd.DataFrame, args: argparse.Namespace, test_base_dir_path: Optional[Path]) -> pd.DataFrame:
     """Filters the DataFrame based on criteria."""
     initial_count = len(df)
-    logging.info(f"Initial translations in status file: {initial_count}")
+    root_logger.info(f"Initial translations in status file: {initial_count}")
 
     # 0. Filter out translations with existing errors (auto-skip failed)
     df_with_errors = df[df['status_last_error'].notna() & (df['status_last_error'] != '')]
     if not df_with_errors.empty:
-        logging.info(f"Skipping {len(df_with_errors)} translations with pre-existing errors in 'status_last_error'.")
+        root_logger.info(f"Skipping {len(df_with_errors)} translations with pre-existing errors in 'status_last_error'.")
     df = df[df['status_last_error'].isna() | (df['status_last_error'] == '')]
 
     # 1. Filter by downloadable flag
     df = df[df['downloadable'] == True].copy() # Use .copy() to avoid SettingWithCopyWarning
-    logging.info(f"Translations after 'downloadable' filter: {len(df)}")
+    root_logger.info(f"Translations after 'downloadable' filter: {len(df)}")
 
     # 2. Filter by redistributable flag (if applicable)
     if not args.allow_non_redistributable:
         df = df[df['Redistributable'] == True].copy()
-        logging.info(f"Translations after 'Redistributable' filter: {len(df)}")
+        root_logger.info(f"Translations after 'Redistributable' filter: {len(df)}")
 
     # 3. Filter by verse count
     df = df[(df['OTverses'] + df['NTverses']) >= args.verse_threshold].copy()
-    logging.info(f"Translations after verse count filter (>= {args.verse_threshold}): {len(df)}")
+    root_logger.info(f"Translations after verse count filter (>= {args.verse_threshold}): {len(df)}")
 
     # 4. Apply test mode filter OR regex filter
     if args.test:
         if not test_base_dir_path:
-            logging.error("TEST MODE: test_base_dir_path not provided to filter_translations. Cannot load test_projects.txt.")
+            root_logger.error("TEST MODE: test_base_dir_path not provided to filter_translations. Cannot load test_projects.txt.")
             return pd.DataFrame() # Return empty DataFrame
 
         test_projects_file = test_base_dir_path / "metadata" / "test_projects.txt"
         if args.filter:
-            logging.warning(f"TEST MODE: --filter argument '{args.filter}' is ignored when --test is active and test_projects.txt is used.")
+            root_logger.warning(f"TEST MODE: --filter argument '{args.filter}' is ignored when --test is active and test_projects.txt is used.")
         
         if test_projects_file.is_file():
             try:
                 with open(test_projects_file, "r", encoding="utf-8") as f:
                     test_ids = {line.strip() for line in f if line.strip()}
                 if test_ids:
-                    logging.info(f"TEST MODE: Filtering by {len(test_ids)} translationIds from {test_projects_file}")
+                    root_logger.info(f"TEST MODE: Filtering by {len(test_ids)} translationIds from {test_projects_file}")
                     df = df[df['translationId'].isin(test_ids)].copy()
                 else:
-                    logging.warning(f"TEST MODE: {test_projects_file} is empty. No test-specific ID filter applied.")
+                    root_logger.warning(f"TEST MODE: {test_projects_file} is empty. No test-specific ID filter applied.")
             except Exception as e:
-                logging.error(f"TEST MODE: Error reading {test_projects_file}: {e}. No test-specific ID filter applied.")
+                root_logger.error(f"TEST MODE: Error reading {test_projects_file}: {e}. No test-specific ID filter applied.")
         else:
-            logging.warning(f"TEST MODE: {test_projects_file} not found. No test-specific ID filter applied. Create it to specify test projects.")
+            root_logger.warning(f"TEST MODE: {test_projects_file} not found. No test-specific ID filter applied. Create it to specify test projects.")
         
-        logging.info(f"TEST MODE: Translations after test_projects.txt filter (if applied): {len(df)}")
+        root_logger.info(f"TEST MODE: Translations after test_projects.txt filter (if applied): {len(df)}")
 
     elif args.filter: # Only apply regex_filter if not in test mode (or if test_projects.txt was not used/found)
         try:
             df = df[df['translationId'].astype(str).str.match(args.filter, na=False)].copy()
-            logging.info(f"Translations after regex filter ('{args.filter}'): {len(df)}")
+            root_logger.info(f"Translations after regex filter ('{args.filter}'): {len(df)}")
         except regex.error as e:
-            logging.error(f"Invalid regex filter '{args.filter}': {e}. Skipping filter.")
+            root_logger.error(f"Invalid regex filter '{args.filter}': {e}. Skipping filter.")
 
     final_count = len(df)
-    logging.info(f"Filtered down to {final_count} translations to process.")
+    root_logger.info(f"Filtered down to {final_count} translations to process.")
     return df
 
 
@@ -499,7 +504,7 @@ def calculate_file_hash(file_path: Path) -> Optional[str]:
                 h.update(chunk)
         return h.hexdigest()
     except Exception as e:
-        logging.error(f"Error calculating hash for {file_path}: {e}")
+        root_logger.error(f"Error calculating hash for {file_path}: {e}")
         return None
 
 def determine_actions(df: pd.DataFrame, max_age_days: int, force_download: bool, hash_for_changes: bool, downloads_folder: Path, projects_folder: Path, private_projects_folder: Path) -> pd.DataFrame:
@@ -585,7 +590,7 @@ def download_required_files(df: pd.DataFrame, base_url: str, folder: Path) -> pd
     """Downloads files marked with action_needed_download."""
     translations_to_download = df[df['action_needed_download']]
     count = len(translations_to_download)
-    logging.info(f"Attempting to download {count} zip files...")
+    root_logger.info(f"Attempting to download {count} zip files...")
 
     downloaded_count = 0
     for index, row in tqdm(translations_to_download.iterrows(), total=count, desc="Downloading"):
@@ -595,21 +600,21 @@ def download_required_files(df: pd.DataFrame, base_url: str, folder: Path) -> pd
         local_filename = build_zip_filename(translation_id, TODAY_STR)
         local_path = folder / local_filename
 
-        logging.info(f"Downloading {url} to {local_path}")
+        root_logger.info(f"Downloading {url} to {local_path}")
         if download_url_to_file(url, local_path):
             df.loc[index, 'status_download_path'] = str(local_path.resolve())
             df.loc[index, 'status_download_date'] = TODAY_STR
             df.loc[index, 'status_last_error'] = np.nan # Clear previous error on success
             downloaded_count += 1
-            logging.info(f"Success: Saved {url} as {local_path}")
+            root_logger.info(f"Success: Saved {url} as {local_path}")
             sleep(randint(1, 3000) / 1000) # Shorter sleep?
         else:
             df.loc[index, 'status_download_path'] = np.nan # Clear path on failure
             df.loc[index, 'status_download_date'] = np.nan # Clear date on failure
             df.loc[index, 'status_last_error'] = f"Download failed: {url}"
-            logging.error(f"Failed: Could not download {url}")
+            root_logger.error(f"Failed: Could not download {url}")
 
-    logging.info(f"Finished downloading. Successfully downloaded {downloaded_count}/{count} files.")
+    root_logger.info(f"Finished downloading. Successfully downloaded {downloaded_count}/{count} files.")
     return df
 
 
@@ -617,7 +622,7 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
     """Unzips, renames, creates settings, and extracts licence for required projects."""
     translations_to_unzip = df[df['action_needed_unzip']]
     count = len(translations_to_unzip)
-    logging.info(f"Attempting to unzip and process {count} projects...")
+    root_logger.info(f"Attempting to unzip and process {count} projects...")
 
     processed_count = 0
     for index, row in tqdm(translations_to_unzip.iterrows(), total=count, desc="Unzipping/Processing"):
@@ -627,13 +632,13 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
         download_path_str = row['status_download_path']
 
         if pd.isna(download_path_str):
-            logging.warning(f"Skipping unzip for {translation_id}: No valid download path found.")
+            root_logger.warning(f"Skipping unzip for {translation_id}: No valid download path found.")
             df.loc[index, 'status_last_error'] = "Unzip skipped: Missing download path"
             continue
 
         download_path = Path(download_path_str)
         if not download_path.exists():
-            logging.warning(f"Skipping unzip for {translation_id}: Download path {download_path} not found.")
+            root_logger.warning(f"Skipping unzip for {translation_id}: Download path {download_path} not found.")
             df.loc[index, 'status_last_error'] = f"Unzip skipped: Download not found at {download_path}"
             continue
 
@@ -641,13 +646,13 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
         proj_name = translation_id
         project_dir = unzip_base_dir / proj_name
 
-        logging.info(f"Processing {translation_id}: Unzipping {download_path} to {project_dir}")
+        root_logger.info(f"Processing {translation_id}: Unzipping {download_path} to {project_dir}")
 
         # --- Unzip ---
         try:
             # Clean existing directory before unzipping
             if project_dir.exists():
-                logging.info(f"Removing existing directory: {project_dir}")
+                root_logger.info(f"Removing existing directory: {project_dir}")
                 shutil.rmtree(project_dir)
             project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -655,7 +660,7 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
             df.loc[index, 'status_unzip_path'] = str(project_dir.resolve())
             df.loc[index, 'status_unzip_date'] = TODAY_STR
             df.loc[index, 'status_last_error'] = np.nan # Clear error on successful unzip
-            logging.info(f"Successfully unzipped to {project_dir}")
+            root_logger.info(f"Successfully unzipped to {project_dir}")
 
             # --- Post-Unzip Processing ---
             # Rename USFM files
@@ -663,10 +668,10 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
 
             # Generate project-specific .vrs file before writing Settings.xml
             try:
-                logging.info(f"Generating project .vrs file for {translation_id}")
+                root_logger.info(f"Generating project .vrs file for {translation_id}")
                 generate_vrs_from_project(project_dir)
             except Exception as e_vrs:
-                logging.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
+                root_logger.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
                 df.loc[index, "status_last_error"] = f"Project VRS generation failed: {e_vrs}"
                 # Continue to attempt settings file write; scoring will use fallback or default.
 
@@ -683,7 +688,7 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
             processed_count += 1
 
         except (shutil.ReadError, FileNotFoundError, OSError) as e: # Catch more specific IO/OS errors
-            logging.error(f"Error processing {translation_id} at {project_dir}: {e}")
+            root_logger.error(f"Error processing {translation_id} at {project_dir}: {e}")
             df.loc[index, 'status_unzip_path'] = np.nan
             df.loc[index, 'status_unzip_date'] = np.nan
             df.loc[index, 'status_last_error'] = f"Processing error: {e}"
@@ -692,15 +697,15 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
                 try:
                     shutil.rmtree(project_dir)
                 except OSError as rm_e:
-                    logging.warning(f"Could not remove failed unzip dir {project_dir}: {rm_e}")
+                    root_logger.warning(f"Could not remove failed unzip dir {project_dir}: {rm_e}")
 
-    logging.info(f"Finished processing. Successfully processed {processed_count}/{count} projects.")
+    root_logger.info(f"Finished processing. Successfully processed {processed_count}/{count} projects.")
     return df
 
 
 def rename_usfm(project_dir: Path):
     """Renames USFM files within the project directory."""
-    logging.info(f"Renaming USFM files in {project_dir}")
+    root_logger.info(f"Renaming USFM files in {project_dir}")
     renamed_count = 0
     try:
         usfm_paths = list(project_dir.glob("*.usfm"))
@@ -711,19 +716,19 @@ def rename_usfm(project_dir: Path):
             if new_sfm_path.is_file():
                 new_sfm_path.unlink()
 
-            logging.debug(f"Renaming {old_usfm_path.name} to {new_sfm_path.name}") # Use debug level
+            root_logger.debug(f"Renaming {old_usfm_path.name} to {new_sfm_path.name}") # Use debug level
             old_usfm_path.rename(new_sfm_path)
             renamed_count += 1
         if renamed_count > 0:
-            logging.info(f"Renamed {renamed_count} USFM files.")
+            root_logger.info(f"Renamed {renamed_count} USFM files.")
     except Exception as e:
-        logging.error(f"Error renaming USFM files in {project_dir}: {e}")
+        root_logger.error(f"Error renaming USFM files in {project_dir}: {e}")
 
 
 def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -> pd.DataFrame:
     """Extracts licence details from copr.htm and updates the DataFrame row."""
     copyright_path = project_dir / "copr.htm"
-    logging.debug(f"Extracting licence info for {project_dir.name} from {copyright_path}")
+    root_logger.debug(f"Extracting licence info for {project_dir.name} from {copyright_path}")
 
     # Clear previous licence data for this row first
     for col in LICENCE_COLUMNS:
@@ -731,7 +736,7 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
             df.loc[index, col] = np.nan
 
     if not copyright_path.exists():
-        logging.warning(f"Unable to find {copyright_path}")
+        root_logger.warning(f"Unable to find {copyright_path}")
         df.loc[index, 'status_last_error'] = f"Licence check failed: copr.htm not found"
         df.loc[index, 'licence_date_read'] = TODAY_STR # Mark as checked today, even if failed
         return df
@@ -773,7 +778,7 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
             copy_strings = [s.strip() for s in body_tag.stripped_strings if s.strip()]
         else:
             copy_strings = []
-            logging.warning(f"Warning: No body or paragraph tag found in {copyright_path}")
+            root_logger.warning(f"Warning: No body or paragraph tag found in {copyright_path}")
 
 
         # Simpler text parsing logic
@@ -824,14 +829,14 @@ def get_and_update_licence_details(df: pd.DataFrame, index, project_dir: Path) -
             if col_suffix in df.columns:
                 df.loc[index, col_suffix] = value
             else:
-                logging.warning(f"Licence key '{col_suffix}' not a column in DataFrame.")
+                root_logger.warning(f"Licence key '{col_suffix}' not a column in DataFrame.")
 
         df.loc[index, 'licence_date_read'] = TODAY_STR
         df.loc[index, 'status_last_error'] = np.nan # Clear error on success
-        logging.debug(f"Successfully extracted licence info for {project_dir.name}")
+        root_logger.debug(f"Successfully extracted licence info for {project_dir.name}")
 
     except Exception as e:
-        logging.error(f"Error parsing licence file {copyright_path}: {e}")
+        root_logger.error(f"Error parsing licence file {copyright_path}: {e}")
         df.loc[index, 'status_last_error'] = f"Licence parse error: {e}"
         df.loc[index, 'licence_date_read'] = TODAY_STR # Mark as checked today, even if failed
 
@@ -845,16 +850,16 @@ def check_and_update_licences(df: pd.DataFrame) -> pd.DataFrame:
     count = len(licence_check_candidates)
 
     if count == 0:
-        logging.info(f"No existing projects require a separate licence check.")
+        root_logger.info(f"No existing projects require a separate licence check.")
         return df
 
-    logging.info(f"Performing licence check for {count} existing projects...")
+    root_logger.info(f"Performing licence check for {count} existing projects...")
     checked_count = 0
     for index, row in tqdm(licence_check_candidates.iterrows(), total=count, desc="Checking Licences"):
         project_path_str = row['status_unzip_path']
 
         if pd.isna(project_path_str):
-            logging.warning(f"Skipping licence check for {row['translationId']}: Missing unzip path.")
+            root_logger.warning(f"Skipping licence check for {row['translationId']}: Missing unzip path.")
             continue
 
         project_dir = Path(project_path_str)
@@ -862,22 +867,22 @@ def check_and_update_licences(df: pd.DataFrame) -> pd.DataFrame:
             df = get_and_update_licence_details(df, index, project_dir)
             checked_count += 1
         else:
-            logging.warning(f"Skipping licence check for {row['translationId']}: Project directory {project_dir} not found.")
+            root_logger.warning(f"Skipping licence check for {row['translationId']}: Project directory {project_dir} not found.")
 
-    logging.info(f"Finished separate licence check. Updated {checked_count}/{count} projects.")
+    root_logger.info(f"Finished separate licence check. Updated {checked_count}/{count} projects.")
     return df
 
 
 def extract_project( # Renamed from _perform_text_extraction_for_project
     project_dir_path: Path,
     output_file_path: Path,
-    translation_id: str # For logging
+    translation_id: str # For root_logger
 ) -> tuple[bool, Optional[str], int]: # Returns: Success_flag, error_message, segment_count
     """
     Extracts text from a Paratext project directory to a specified output file.
     Assumes Settings.xml is already present in project_dir_path.
     """
-    logging.debug(f"Starting text extraction for {translation_id} from {project_dir_path} to {output_file_path}")
+    root_logger.debug(f"Starting text extraction for {translation_id} from {project_dir_path} to {output_file_path}")
     try:
         # ParatextTextCorpus uses Settings.xml within project_dir_path for versification.
         # include_markers=False is the default for typical parallel corpus text.
@@ -899,19 +904,19 @@ def extract_project( # Renamed from _perform_text_extraction_for_project
                 segment_count += 1
         
         if segment_count == 0:
-            logging.warning(f"Extraction for {translation_id} resulted in 0 segments. Output file {output_file_path} created but is empty.")
+            root_logger.warning(f"Extraction for {translation_id} resulted in 0 segments. Output file {output_file_path} created but is empty.")
 
-        logging.debug(f"Successfully extracted {segment_count} segments for {translation_id} to {output_file_path}")
+        root_logger.debug(f"Successfully extracted {segment_count} segments for {translation_id} to {output_file_path}")
         return True, None, segment_count
 
     except Exception as e:
-        logging.error(f"Error during text extraction for {translation_id} from {project_dir_path} to {output_file_path}: {e}", exc_info=True)
+        root_logger.error(f"Error during text extraction for {translation_id} from {project_dir_path} to {output_file_path}: {e}", exc_info=True)
         if output_file_path.exists():
             try:
                 output_file_path.unlink()
-                logging.info(f"Removed incomplete output file: {output_file_path}")
+                root_logger.info(f"Removed incomplete output file: {output_file_path}")
             except OSError as unlink_e:
-                logging.error(f"Error removing incomplete extraction output {output_file_path}: {unlink_e}")
+                root_logger.error(f"Error removing incomplete extraction output {output_file_path}: {unlink_e}")
         return False, str(e), 0
 
 
@@ -925,7 +930,7 @@ def extract_and_finalize_texts(
     """
     translations_to_extract = df[df['action_needed_extract']]
     count = len(translations_to_extract)
-    logging.info(f"Attempting to extract text for {count} projects...")
+    root_logger.info(f"Attempting to extract text for {count} projects...")
 
     extracted_count = 0
     # Assign tqdm iterator to a variable to allow dynamic description updates
@@ -942,7 +947,7 @@ def extract_and_finalize_texts(
         if pd.isna(project_unzip_path_str):
             # Update description for skipped item
             pbar.set_description_str(f"Skipping {translation_id} (no unzip_path)")
-            logging.warning(f"Skipping extraction for {translation_id}: No valid unzip path.")
+            root_logger.warning(f"Skipping extraction for {translation_id}: No valid unzip path.")
             df.loc[index, 'status_last_error'] = "Extraction skipped: Missing unzip path"
             continue
         
@@ -951,7 +956,7 @@ def extract_and_finalize_texts(
 
         if not project_dir_path.is_dir():
             pbar.set_description_str(f"Skipping {project_display_name} (project dir not found)")
-            logging.warning(f"Skipping extraction for {translation_id}: Project directory not found at {project_dir_path}.")
+            root_logger.warning(f"Skipping extraction for {translation_id}: Project directory not found at {project_dir_path}.")
             df.loc[index, 'status_last_error'] = f"Extraction skipped: Project dir not found at {project_dir_path}"
             continue
 
@@ -977,7 +982,7 @@ def extract_and_finalize_texts(
             df.loc[index, 'status_extract_date'] = np.nan
             df.loc[index, 'status_last_error'] = f"Extraction failed: {error_msg}"
 
-    logging.info(f"Finished text extraction. Successfully extracted {extracted_count}/{count} projects.")
+    root_logger.info(f"Finished text extraction. Successfully extracted {extracted_count}/{count} projects.")
     return df
 
 
@@ -992,7 +997,7 @@ def update_all_settings(
     """
     Iterates through project folders, regenerates Settings.xml, and updates status_df.
     """
-    logging.info("--- Running in --update-settings mode ---")
+    root_logger.info("--- Running in --update-settings mode ---")
     settings_report_data = [] # List to store data for the CSV report
     processed_folders = 0
 
@@ -1000,9 +1005,9 @@ def update_all_settings(
     status_df_indexed = status_df.set_index('translationId', drop=False)
 
     for base_folder in [projects_folder, private_projects_folder]:
-        logging.info(f"Scanning folder: {base_folder}")
+        root_logger.info(f"Scanning folder: {base_folder}")
         if not base_folder.is_dir():
-            logging.warning(f"Folder not found, skipping: {base_folder}")
+            root_logger.warning(f"Folder not found, skipping: {base_folder}")
             continue
 
         for project_dir in base_folder.iterdir():
@@ -1014,21 +1019,21 @@ def update_all_settings(
                     row = status_df_indexed.iloc[index]
                     lang_code = row['languageCode']
                     if pd.isna(lang_code):
-                        logging.warning(f"Skipping {translation_id}: Missing languageCode in status file.")
+                        root_logger.warning(f"Skipping {translation_id}: Missing languageCode in status file.")
                         continue
 
                     # Ensure project .vrs exists before updating settings with scoring
                     project_vrs_file = project_dir / f"{translation_id}.vrs"
                     if not project_vrs_file.is_file():
-                        logging.info(f"Generating missing project .vrs file for {translation_id} before settings update.")
+                        root_logger.info(f"Generating missing project .vrs file for {translation_id} before settings update.")
                         try:
                             generate_vrs_from_project(project_dir)
                             # status_df.loc[status_df["translationId"] == translation_id, "status_project_vrs_generated_date"] = TODAY_STR # type: ignore
                         except Exception as e_vrs_update:
-                            logging.error(f"Error generating project .vrs for {translation_id} during settings update: {e_vrs_update}")
+                            root_logger.error(f"Error generating project .vrs for {translation_id} during settings update: {e_vrs_update}")
                             # Continue, write_settings_file might handle missing .vrs with a default
 
-                    logging.info(f"Updating settings for {translation_id} in {project_dir}")
+                    root_logger.info(f"Updating settings for {translation_id} in {project_dir}")
                     settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code)
 
                     if settings_path:
@@ -1045,21 +1050,21 @@ def update_all_settings(
                         }
                         settings_report_data.append(report_entry)
                     else:
-                        logging.error(f"Failed to write settings for {translation_id}")
+                        root_logger.error(f"Failed to write settings for {translation_id}")
                         status_df.loc[status_df['translationId'] == translation_id, 'status_last_error'] = "Settings update failed"
                 else:
-                    logging.warning(f"Skipping {project_dir}: No entry found in status file for translationId '{translation_id}'.")
+                    root_logger.warning(f"Skipping {project_dir}: No entry found in status file for translationId '{translation_id}'.")
 
     # --- Write the settings update report ---
     if settings_report_data:
         report_df = pd.DataFrame(settings_report_data)
         try:
             report_df.to_csv(report_path, index=False, encoding='utf-8')
-            logging.info(f"Saved settings update report to {report_path}")
+            root_logger.info(f"Saved settings update report to {report_path}")
         except Exception as e:
-            logging.error(f"Error saving settings update report to {report_path}: {e}")
+            root_logger.error(f"Error saving settings update report to {report_path}: {e}")
 
-    logging.info(f"--- Settings update complete. Processed {processed_folders} potential project folders. ---")
+    root_logger.info(f"--- Settings update complete. Processed {processed_folders} potential project folders. ---")
     return status_df
 
 
@@ -1069,10 +1074,10 @@ def calculate_hashes(df: pd.DataFrame) -> pd.DataFrame:
     translations_to_hash = df[df['action_needed_wildebeest_hash']] 
     count = len(translations_to_hash)
     if count == 0:
-        logging.info("No files require wildebeest_hash calculation.")
+        root_logger.info("No files require wildebeest_hash calculation.")
         return df
 
-    logging.info(f"Attempting to calculate wildebeest_hash for {count} files...")
+    root_logger.info(f"Attempting to calculate wildebeest_hash for {count} files...")
 
     hashed_count = 0
     for index, row in tqdm(translations_to_hash.iterrows(), total=count, desc="Calculating Wildebeest Hashes"):
@@ -1080,7 +1085,7 @@ def calculate_hashes(df: pd.DataFrame) -> pd.DataFrame:
         extract_path_str = row['status_extract_path']
 
         if pd.isna(extract_path_str) or not Path(extract_path_str).is_file():
-            logging.warning(f"Skipping hash for {translation_id}: No valid extract path found or file missing.")
+            root_logger.warning(f"Skipping hash for {translation_id}: No valid extract path found or file missing.")
             df.loc[index, 'status_last_error'] = "Hash skipped: Missing extract file"
             continue
 
@@ -1100,7 +1105,7 @@ def calculate_hashes(df: pd.DataFrame) -> pd.DataFrame:
             df.loc[index, 'wildebeest_hash_date'] = np.nan # type: ignore
             df.loc[index, 'status_last_error'] = f"Wildebeest hash calculation failed for {extract_file_path}"
 
-    logging.info(f"Finished wildebeest_hash calculation. Successfully hashed {hashed_count}/{count} files.")
+    root_logger.info(f"Finished wildebeest_hash calculation. Successfully hashed {hashed_count}/{count} files.")
     return df
 
 
@@ -1109,10 +1114,10 @@ def calculate_extract_hashes(df: pd.DataFrame) -> pd.DataFrame:
     translations_to_hash = df[df['action_needed_extract_hash']]
     count = len(translations_to_hash)
     if count == 0:
-        logging.info("No files require extract hash (status_extract_hash) calculation.")
+        root_logger.info("No files require extract hash (status_extract_hash) calculation.")
         return df
 
-    logging.info(f"Attempting to calculate extract hash (status_extract_hash) for {count} files...")
+    root_logger.info(f"Attempting to calculate extract hash (status_extract_hash) for {count} files...")
     hashed_count = 0
     
     pbar = tqdm(translations_to_hash.iterrows(), total=count, desc="Calculating Extract Hashes")
@@ -1122,7 +1127,7 @@ def calculate_extract_hashes(df: pd.DataFrame) -> pd.DataFrame:
         pbar.set_description_str(f"Calculating Extract Hashes: {translation_id}")
 
         if pd.isna(extract_path_str) or not Path(extract_path_str).is_file():
-            logging.warning(f"Skipping extract hash for {translation_id}: No valid extract path or file missing.")
+            root_logger.warning(f"Skipping extract hash for {translation_id}: No valid extract path or file missing.")
             continue
 
         extract_file_path = Path(extract_path_str)
@@ -1134,14 +1139,13 @@ def calculate_extract_hashes(df: pd.DataFrame) -> pd.DataFrame:
             df.loc[index, 'status_last_error'] = np.nan # type: ignore # Clear error on success
             hashed_count += 1
         else:
-            logging.warning(f"Extract hash (status_extract_hash) calculation failed for {translation_id}")
+            root_logger.warning(f"Extract hash (status_extract_hash) calculation failed for {translation_id}")
             df.loc[index, 'status_last_error'] = f"Extract hash calculation failed for {extract_file_path}"
     
-    logging.info(f"Finished extract hash (status_extract_hash) calculation. Successfully hashed {hashed_count}/{count} files.")
+    root_logger.info(f"Finished extract hash (status_extract_hash) calculation. Successfully hashed {hashed_count}/{count} files.")
     return df
 
 def main() -> None:
-    load_dotenv()
 
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description="Download, unzip and process eBible translations using a status file."
@@ -1191,18 +1195,18 @@ def main() -> None:
     if args.test:
         test_base_dir_env = os.getenv("TEST_EBIBLE_DATA_DIR")
         if not test_base_dir_env:
-            logging.critical("Error: --test mode active but TEST_EBIBLE_DATA_DIR not set in .env file.")
+            root_logger.critical("Error: --test mode active but TEST_EBIBLE_DATA_DIR not set in .env file.")
             sys.exit(1)
         test_base_dir_path_for_filter = Path(test_base_dir_env).resolve() # Store for filter_translations
         base = test_base_dir_path_for_filter # Use the same resolved path for 'base'
-        logging.info(f"Running in TEST mode. Using base folder: {base}")
+        root_logger.info(f"Running in TEST mode. Using base folder: {base}")
     else: # Production mode
         prod_base_dir_env = os.getenv("EBIBLE_DATA_DIR")
         if not prod_base_dir_env:
-            logging.critical("Error: EBIBLE_DATA_DIR not set in .env file (and not in --test mode).")
+            root_logger.critical("Error: EBIBLE_DATA_DIR not set in .env file (and not in --test mode).")
             sys.exit(1)
         base = Path(prod_base_dir_env).resolve()
-        logging.info(f"Using base folder from EBIBLE_DATA_DIR: {base}")
+        root_logger.info(f"Using base folder from EBIBLE_DATA_DIR: {base}")
         
     # --- Define Paths ---
     corpus_folder: Path = base / "corpus"
@@ -1219,7 +1223,7 @@ def main() -> None:
     log_suffix: str = f"_{year}_{month:02d}_{day:02d}-{hour:02d}_{minute:02d}"
     log_filename: str = f"ebible_status{log_suffix}.log"
     logfile: Path = logs_folder / log_filename
-    logging.info(f"Logging to: {logfile}")
+    root_logger.info(f"Logging to: {logfile}")
 
 
     # --- Check Folders ---
@@ -1235,23 +1239,23 @@ def main() -> None:
         env_max_age = os.getenv("MAX_AGE_DAYS")
         if env_max_age and env_max_age.isdigit():
             max_age_days = int(env_max_age)
-            logging.info(f"Using MAX_AGE_DAYS={max_age_days} from .env file.")
+            root_logger.info(f"Using MAX_AGE_DAYS={max_age_days} from .env file.")
         else:
             max_age_days = 365 # Hardcoded default
-            logging.info(f"Using default max_age_days={max_age_days}.")
+            root_logger.info(f"Using default max_age_days={max_age_days}.")
     else:
-        logging.info(f"Using --max-age-days={max_age_days} from command line.")
+        root_logger.info(f"Using --max-age-days={max_age_days} from command line.")
 
     # --- Download translations.csv if needed ---
     translations_csv_url: str = r"https://ebible.org/Scriptures/translations.csv"
     translations_csv: Path = metadata_folder / TRANSLATIONS_FILENAME
     if not translations_csv.is_file() or args.force_download:
-        logging.info(f"Downloading {translations_csv_url} to {translations_csv}")
+        root_logger.info(f"Downloading {translations_csv_url} to {translations_csv}")
         if not download_url_to_file(translations_csv_url, translations_csv):
-            logging.critical(f"Failed to download {translations_csv}. Aborting.")
+            root_logger.critical(f"Failed to download {translations_csv}. Aborting.")
             sys.exit(1)
     else:
-        logging.info(f"{translations_csv} already exists.")
+        root_logger.info(f"{translations_csv} already exists.")
 
     # --- Load or Initialize Status ---
     status_path = metadata_folder / STATUS_FILENAME
@@ -1270,11 +1274,11 @@ def main() -> None:
         # Save the updated status file
         try: # Save status_df which was updated within update_all_settings
             updated_status_df.to_csv(status_path, index=False)
-            logging.info(f"\nSaved updated status after settings update to {status_path}")
+            root_logger.info(f"\nSaved updated status after settings update to {status_path}")
         except Exception as e:
-            logging.error(f"Error saving status file {status_path} after settings update: {e}")
+            root_logger.error(f"Error saving status file {status_path} after settings update: {e}")
         # Print SILNLP commands and exit
-        logging.info("Settings update mode finished. No further extraction commands needed as extraction is internal.")
+        root_logger.info("Settings update mode finished. No further extraction commands needed as extraction is internal.")
         sys.exit(0)
 
     # --- Scan existing folders to update status if necessary---
@@ -1302,13 +1306,13 @@ def main() -> None:
     )
 
     if filtered_df.empty:
-        logging.info("No translations match the specified filters. Exiting.")
+        root_logger.info("No translations match the specified filters. Exiting.")
         # Save status file even if empty? Maybe not necessary.
         # filtered_df.to_csv(status_path, index=False)
         # The warning for test mode is now handled inside filter_translations if test_projects.txt leads to empty.
         # We can add a general one here too if needed.
         if args.test and not (test_base_dir_path_for_filter / "metadata" / "test_projects.txt").is_file(): # type: ignore
-            logging.warning(f"TEST MODE: No 'test_projects.txt' found in {test_base_dir_path_for_filter / 'metadata'}. Combined with other filters, this resulted in no translations.") # type: ignore
+            root_logger.warning(f"TEST MODE: No 'test_projects.txt' found in {test_base_dir_path_for_filter / 'metadata'}. Combined with other filters, this resulted in no translations.") # type: ignore
         sys.exit(0)
 
     # --- Determine Actions ---
@@ -1325,11 +1329,11 @@ def main() -> None:
 
     # Option to stop after download (re-evaluate if needed)
     if args.download_only:
-        logging.info(f"Stopping after download phase as requested.")
+        root_logger.info(f"Stopping after download phase as requested.")
         # Save status now
         status_df.update(actions_df) # Update the main df with changes
         status_df.to_csv(status_path, index=False)
-        logging.info(f"Saved updated status to {status_path}")
+        root_logger.info(f"Saved updated status to {status_path}")
         sys.exit(0)
 
     # Unzip, Rename, Settings, Licence
@@ -1350,11 +1354,11 @@ def main() -> None:
 
     # --- Calculate Hashes ---
     if args.hash_for_changes:
-        logging.info("Running in --hash-for-changes mode. Calculating/Updating 'wildebeest_hash'.")
+        root_logger.info("Running in --hash-for-changes mode. Calculating/Updating 'wildebeest_hash'.")
         actions_df = calculate_hashes(actions_df) # This is the wildebeest hash function
     else:
         # In normal mode, calculate extract hashes if missing or file was re-extracted
-        logging.info("Running in normal mode. Calculating/Updating 'status_extract_hash' if needed.")
+        root_logger.info("Running in normal mode. Calculating/Updating 'status_extract_hash' if needed.")
         actions_df = calculate_extract_hashes(actions_df)
 
 
@@ -1368,9 +1372,9 @@ def main() -> None:
 
     try:
         status_df.to_csv(status_path, index=False)
-        logging.info(f"\nSaved updated status for {len(status_df)} translations to {status_path}")
+        root_logger.info(f"\nSaved updated status for {len(status_df)} translations to {status_path}")
     except Exception as e:
-        logging.error(f"Error saving status file {status_path}: {e}")
+        root_logger.error(f"Error saving status file {status_path}: {e}")
 
     # --- Report Missing Extracts ---
     # Re-scan folders to update status one last time before reporting
@@ -1389,18 +1393,18 @@ def main() -> None:
     missing_extracts_df = report_scope_df[report_scope_df['status_extract_date'].isna() & report_scope_df['downloadable'] & ((report_scope_df['OTverses'] + report_scope_df['NTverses']) >= args.verse_threshold)]
 
     if not missing_extracts_df.empty:
-        logging.warning(f"\n{len(missing_extracts_df)} translations appear to be missing extracted corpus files (.txt):")
+        root_logger.warning(f"\n{len(missing_extracts_df)} translations appear to be missing extracted corpus files (.txt):")
         for index, row in missing_extracts_df.iterrows():
-            logging.warning(f"  - {row['translationId']}: Expected at {row['status_extract_path']}")
+            root_logger.warning(f"  - {row['translationId']}: Expected at {row['status_extract_path']}")
     
     # --- Final Info ---
-    logging.info("\nLicence Type Summary (Processed Translations):")
+    root_logger.info("\nLicence Type Summary (Processed Translations):")
     # Filter actions_df for successfully processed ones if needed, or show all filtered
-    # Handle pandas Series logging
+    # Handle pandas Series
     licence_counts = actions_df['licence_Licence_Type'].value_counts(dropna=False)
-    logging.info(f"\n{licence_counts.to_string()}")
+    root_logger.info(f"\n{licence_counts.to_string()}")
 
-    logging.info("\n--- ebible.py processing finished ---")
+    root_logger.info("\n--- ebible.py processing finished ---")
 
 
 if __name__ == "__main__":

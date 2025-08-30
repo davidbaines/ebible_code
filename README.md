@@ -1,16 +1,16 @@
 # eBible
-This repo contains some of the scripts that create the data found in the [ebible_data](https://github.com/davidbaines/ebible_data) repository. The workflow relies on SILNLP's bulk_extract_corpora.py script to perform the Paratext-project-to-text file conversion. 
+This repo contains the code used to create the data found in the [ebible_data](https://github.com/davidbaines/ebible_data) repository. The workflow relies on SILNLP's bulk_extract_corpora.py script to perform the conversion from Paratext project to text file. The text files contain one verse (or verse range) per line.
 
 ## Copyright Restrictions
-The Bibles are collected from eBible.org either in the Public Domain, with a Creative Commons license, or with permission of the rights holder.
+The Bibles are collected from eBible.org and those marked as redistibutable are included. Files are shared with a number of different licences as they are on the site [eBible.org](https://ebible.org/). 
 
-## Data Format
-USFM files are downloaded from [eBible.org](https://ebible.org/), one zip file per Bible. We use bulk_extract_corpora.py from [SIL's NLP repo](https://github.com/sillsdev/silnlp/tree/master/silnlp/common/) to extract the verse text into the one verse per line format. 
+## Process
+Each Bible is downloaded from [eBible.org](https://ebible.org/) as a zipped folder containing .SFM files.
+After unzipping the code calculates the most likely versification and places that along with the iso code for the language in the Settings.xml file. This file is required by Machine.py which is used to create a plain text file for each Bible in the VREF format (one verse or verse-range per line).
 
-### File Naming Convention
-The SILNLP tool `bulk_extract_corpora.py` names the extracted text files with the format `<languageCode>-<project_folder_name>.txt`. The project folder names are typically the same as the `<translationId>`, which, is often the same as the languageCode, or begins with the languageCode. This results in names like `<languageCode>-<translationId>.txt` (e.g., `eng-KJV.txt` or `aai-aai.txt`).
+### File Naming Convention for the VREF files.
+The project folder names are typically the same as the `<translationId>`, which, is often the same as the languageCode, or begins with the languageCode. `<languageCode>-` is prepended to the `<translationId>` and a `.txt` suffix used. (e.g., `eng-KJV.txt` or `aai-aai.txt`).
 
-After the SILNLP extraction, the `ebible.py` script is run a second time. This pass renames these files to remove any redundant leading `<languageCode>-` prefix if present, or simplifies names like `<languageCode>-<languageCode>.txt` to `<languageCode>.txt`.
 
 The **final file naming convention** for files stored in the repository and referenced by `ebible_status.csv` is:
 `<translationId>.txt` (e.g., `KJV.txt`, `aai.txt`, `abt-maprik.txt`)

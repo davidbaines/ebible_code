@@ -18,7 +18,7 @@ from machine.scripture import Versification, VersificationType, book_id_to_numbe
 
 # Get logger for this module
 logger = logging.getLogger(__name__)
-logger.info("--- settings_file.py module loaded and logger obtained ---")
+logger.debug("--- settings_file.py module loaded and logger obtained ---")
 
 # --- Scoring Weights (inspired by update_versifications.py) ---
 WEIGHT_BOOK = 0.0  # Weight for matching book presence
@@ -88,7 +88,7 @@ def populate_standard_versifications() -> None:
             if vrs_obj:
                 LOADED_VRS_OBJECTS[vrs_obj.name] = vrs_obj
                 VRS_NAME_TO_NUM_STRING[vrs_obj.name] = str(vtype.value) # Use enum value
-                logger.info(f"Successfully loaded and mapped standard versification: {vrs_obj.name} -> {vtype.value}")
+                logger.debug(f"Successfully loaded and mapped standard versification: {vrs_obj.name} -> {vtype.value}")
             else:
                 logger.warning(f"Could not load standard versification for type: {vtype.name} (returned None)")
         except Exception as e:

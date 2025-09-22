@@ -1,4 +1,4 @@
-# eBible
+# eBible 2025
 This repo contains the code used to create the data found in the [ebible_data](https://github.com/davidbaines/ebible_data) repository. The workflow relies on SILNLP's bulk_extract_corpora.py script to perform the conversion from Paratext project to text file. The text files contain one verse (or verse range) per line.
 
 ## Copyright Restrictions

@@ -1,25 +1,21 @@
 # eBible 2025
-This repo contains the code used to create the data found in the [ebible_data](https://github.com/davidbaines/ebible_data) repository. The workflow relies on SILNLP's bulk_extract_corpora.py script to perform the conversion from Paratext project to text file. The text files contain one verse (or verse range) per line.
+This repo contains the code used to create the data found in the [ebible_data](https://github.com/davidbaines/ebible_data) repository. Text extraction from Paratext projects is performed internally using the [sil-machine](https://github.com/sillsdev/machine.py) library. The text files contain one verse (or verse range) per line.
 
 ## Copyright Restrictions
 The Bibles are collected from eBible.org and those marked as redistibutable are included. Files are shared with a number of different licences as they are on the site [eBible.org](https://ebible.org/). 
 
 ## Process
 Each Bible is downloaded from [eBible.org](https://ebible.org/) as a zipped folder containing .SFM files.
-After unzipping the code calculates the most likely versification and places that along with the iso code for the language in the Settings.xml file. This file is required by Machine.py which is used to create a plain text file for each Bible in the VREF format (one verse or verse-range per line).
+After unzipping, the code calculates the most likely versification and places that along with the iso code for the language in the Settings.xml file. This file is used by the `sil-machine` library (`ParatextTextCorpus`) to extract a plain text file for each Bible in the VREF format (one verse or verse-range per line).
 
 ### File Naming Convention for the VREF files.
-The project folder names are typically the same as the `<translationId>`, which, is often the same as the languageCode, or begins with the languageCode. `<languageCode>-` is prepended to the `<translationId>` and a `.txt` suffix used. (e.g., `eng-KJV.txt` or `aai-aai.txt`).
-
-
-The **final file naming convention** for files stored in the repository and referenced by `ebible_status.csv` is:
-`<translationId>.txt` (e.g., `KJV.txt`, `aai.txt`, `abt-maprik.txt`)
+Corpus files are named `<translationId>.txt` (e.g., `KJV.txt`, `aai.txt`, `abt-maprik.txt`)
 
 where:
   - `<translationId>` is the identifier taken from the `translations.csv` file downloaded from ebible.org.
 
 ### Verse References
-Verse references are shown inthe in the _vref.txt_ file. The line number of the verse reference is the same for all corpus files.
+Verse references are shown in the _vref.txt_ file. The line number of the verse reference is the same for all corpus files.
 GEN 1:1 is on the first line of every file, GEN 1:2 is on the second line and so on.
 
   - \<book\> \<chapter\>:\<verse\> (e.g., 'GEN 1:1')
@@ -50,10 +46,10 @@ Download the zipped translations and unzip them - the unzipped folders each cont
 
 Prepare the Project Folders: For each newly downloaded or unzipped translation, the script performs several tasks:
   a. Rename USFM Files to ensure consistency for subsequent processing. 
-  b. Find the list of chapters and verses that exist in each project as step towards determining the versification used by the translation. These are saved in the metadata folder in a file called compare_versifications.csv.
-  c. Calculate the best versification and use it when writing the Settings.xml for each project. Settings.xml includes important metadata for SIL tools, such as the language code, the versification and the filenaming convention.
+  b. Generate a project-specific `.vrs` file (saved inside the project folder) recording the maximum verse numbers per chapter. This is used to determine the versification used by the translation.
+  c. Calculate the best versification by scoring the project's `.vrs` file against all standard versifications, and use it when writing the Settings.xml for each project. Settings.xml includes important metadata for SIL tools, such as the language code, the versification and the filenaming convention.
   d. Extract License Information: The script parses the copr.htm file from the project folder and extract copyright statements, Creative Commons license details and save this summary of the licence information in the ebible_status.csv.
-  e. The code should then extract the project data into the vref, or one verse per line, format that is used by SILNLP. This effectively creates a multilingual parallel corpus since every verse from each translation is on the same line number in each text file of the corpus. These output files are placed in the corpus folder (for public data) or to the private_corpus folder (for private data).  
+  e. Extract the project data into the vref, or one verse per line, format using the `sil-machine` library. This effectively creates a multilingual parallel corpus since every verse from each translation is on the same line number in each text file of the corpus. These output files are placed in the corpus folder (for public data) or to the private_corpus folder (for private data).  
   
 ## ebible_status.csv 
 Throughout all these stages, ebible_status.csv serves as the central ledger. It's continuously updated to reflect:
@@ -71,7 +67,7 @@ It bypasses the download, unzip, and full processing pipeline. Instead, it itera
 For each project, it regenerates the Settings.xml file (and the associated project-specific .vrs file if it's missing or needs an update). This is useful for applying new logic for versification scoring or other settings changes across all previously processed translations.
 It updates ebible_status.csv with the new settings file date and any changed versification information.
 A report detailing the changes made to settings files (settings_update.csv) is generated.
-The script then prints the SILNLP commands and exits.
+The script then exits.
 
 
 To run it:
@@ -97,7 +93,8 @@ In simple terms, the script:
 - downloads a `translations.csv` file which outlines the currently available translations (in `metadata` dir)
 - downloads zip files for each translation (in `downloads` dir)
 - unpacks those zip files into paratext projects (in `projects` dir)
-- constructs a licence file (in `metadata` dir)
+- extracts verse-aligned text for each project (in `corpus` dir)
+- constructs licence information (stored in `ebible_status.csv` in `metadata` dir)
 
 ```mermaid
  flowchart TD
@@ -110,21 +107,18 @@ In simple terms, the script:
     Ebible[ebible.org] --> |save zip| DownloadDir
     Ids --> |generate projects for these id's| Projects[project dirs]
     DownloadDir --> |unzip| Projects
-    Projects --> |bulk_extract_corpora| CorpusDir[corpus dir]
+    Projects --> |rename USFM, generate .vrs, write Settings.xml| Projects
+    Projects --> |sil-machine extract_scripture_corpus| CorpusDir[corpus dir]
 ```
 
 ### Building extracts
-The building of the extracts is done by `bulk_extract_corpora` from the silnlp project.
-It generates one extract file for each paratext projects.
-The extracts are put into the data directory `corpus` dir.
+Text extraction is performed internally by `ebible.py` using the `sil-machine` library (`extract_scripture_corpus`). It generates one corpus file per Paratext project, written directly to the `corpus` (or `private_corpus`) directory as `<translationId>.txt`.
 
-Once you have checked the `corpus` dir, you would replace the checked in corpus dir with your newly generated one.
-
-There are smoke tests in (test_smoke.py](./tests/test_smoke.py) to help pick up common issues. #TODO-check
+There are smoke tests in [test_smoke.py](./tests/test_smoke.py) to help pick up common issues.
 
 ### Publishing to hugging face
 The corpus_to_parquet.py script will convert the ebible_data/corpus files into a parquet file ready for uploading to HuggingFace as a dataset.
-It will also create a parquet file from the data in the ebible_data/metadata/eBible Corpus Metadata.xlsx file. #TODO add a data filtering and loading script for HuggingFace.
+It will also create a metadata parquet file from the data in `ebible_status.csv`.
 
 ### Caching of zip files
 The script caches downloaded zip files to:
@@ -135,8 +129,8 @@ The script caches downloaded zip files to:
 The zip files are suffixed with a date representing the UTC date that they were downloaded,
 e.g. if translation id `eng-KJV` was downloaded on April 5th 2023, the filename would be `eng-KJV--2023-04-05.zip`.
 
-By default, the script will use the cached data for up to 14 days after it was downloaded.
-This can be overridden, e.g. to set it to 30 days use `--max_zip_age_days 30`
+By default, the script will use the cached data for up to 365 days after it was downloaded.
+This can be overridden via the `MAX_AGE_DAYS` variable in `.env`, or on the command line, e.g. to set it to 30 days use `--max-age-days 30`
 
 Additionally the flag `--force_download` will ignore the cache and download everything fresh (including the `translations.csv` file).
 
@@ -149,16 +143,16 @@ This is useful when you are debugging/testing around particular translation id's
 This example picks out every translation id starting with "grc":
 
 ```
-python ebible.py -f 'grc' PATH_TO_DATA_DIRECTORY
+poetry run python ebible_code/ebible.py -f 'grc'
 
 // Output
 Command line filter used to reduce translation id's to ['grcbrent', 'grcbyz', 'grcf35', 'grcmt', 'grcsbl', 'grcsr', 'grctcgnt', 'grc-tisch', 'grctr']
 ```
 
-This example matches just "gpu" (and not "gupk"):
+This example matches just "gup" (and not "gupk"):
 
 ```
-$ python ebible.py -f 'gup$' PATH_TO_DATA_DIRECTORY
+poetry run python ebible_code/ebible.py -f 'gup$'
 
 // Output
 Command line filter used to reduce translation id's to ['gup']
@@ -167,7 +161,7 @@ Command line filter used to reduce translation id's to ['gup']
 This example matches translations id's starting with "gfk" or "hbo":
 
 ```
-python ebible.py -f '(gfk|hbo)' PATH_TO_DATA_DIRECTORY
+poetry run python ebible_code/ebible.py -f '(gfk|hbo)'
 
 // Output
 Command line filter used to reduce translation id's to ['gfk', 'gfkh', 'gfks', 'hbo', 'hboWLC']

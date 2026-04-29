@@ -314,12 +314,18 @@ def write_settings_file(
         if vrs_num_string not in VALID_VRS_NUM_STRINGS:
             raise ValueError(f"Invalid versification: {vrs_num_string}")
 
+        # PostPart must match the prefix used by rename_usfm (folder_name[:3]),
+        # which may differ from language_code when the translationId doesn't start
+        # with the ISO 639-3 code (e.g. translationId "zapNT" → prefix "zap",
+        # but language_code is "zpi").
+        file_prefix = project_folder.name[:3]
+
         # Define new values for reporting
         new_settings = {
             "new_Versification": vrs_num_string,
             "new_LanguageIsoCode": f"{language_code}:::",
-            "new_BookNameForm": "41MAT", # Consistent naming scheme
-            "new_PostPart": f"{language_code}.SFM",
+            "new_BookNameForm": "41MAT",
+            "new_PostPart": f"{file_prefix}.SFM",
             "new_PrePart": "",
         }
 

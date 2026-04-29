@@ -4,61 +4,61 @@ import pytest
 from dotenv import load_dotenv
 from pathlib import Path
 
-from ebible_code.settings_file import get_book_names, get_versification, get_vrs_diffs
+from ebible_code.settings_file import get_versification_with_scoring
+from ebible_code.rename_usfm import get_destination_file_from_book
 
 load_dotenv()
 
-# Define base paths relative to the repository root and relative to the EBIBLE_DATA_DIR
+_ebible_data_dir_env = os.getenv("EBIBLE_DATA_DIR")
+EBIBLE_DATA_PROJECTS = Path(_ebible_data_dir_env).resolve() / "projects" if _ebible_data_dir_env else None
 
-ASSETS_PATH = Path("ebible_code/assets") # Path to where assets like vrs_diffs.yaml live
-EBIBLE_DATA_DIR = Path(os.getenv("EBIBLE_DATA_DIR")).resolve()
-EBIBLE_DATA_PROJECTS = EBIBLE_DATA_DIR / "projects"
 
-# Load versification differences once for all tests
-vrs_diffs = get_vrs_diffs()
+# --- Test get_versification_with_scoring ---
 
-# --- Test get_versification ---
-# Define test cases: list of tuples (project_subfolder_name, expected_versification)
 versification_test_cases = [
-    ("eng-web-c", "English"),      # Standard English versification, also the default
-    ("eng-vul", "Vulgate"),
-    ("rus-synod-usfm-from-textus-rec", "Russian Orthodox"),
-    ("rus-vrt", "Russian Protestant"),
-    # Add a case that likely doesn't have specific diff markers and should use the default
-    ("abt-maprik", "English"),
-    # Add more test cases as needed
-    ("eng-uk-lxx2012", "Septuagint"),
+    ("eng-web-c",                        "English"),
+    ("eng-vul",                          "Vulgate"),
+    ("rus-synod-usfm-from-textus-rec",   "Russian Orthodox"),
+    ("rus-vrt",                          "Russian Protestant"),
+    ("abt-maprik",                       "English"),
+    ("eng-uk-lxx2012",                   "Septuagint"),
 ]
 
 @pytest.mark.parametrize("project_folder_name, expected_versification", versification_test_cases)
 def test_get_versification(project_folder_name, expected_versification):
-    """Tests get_versification against various projects with known versifications."""
+    """Tests get_versification_with_scoring against projects with known versifications."""
+    if EBIBLE_DATA_PROJECTS is None:
+        pytest.skip("EBIBLE_DATA_DIR not set in .env")
     project_path = EBIBLE_DATA_PROJECTS / project_folder_name
-    
-    # Ensure the project directory exists before running the test
     if not project_path.is_dir():
         pytest.skip(f"Test project directory not found: {project_path}")
 
-    actual_versification = get_versification(project_path, vrs_diffs)
-    assert actual_versification == expected_versification, \
-        f"For project '{project_folder_name}': Expected versification '{expected_versification}', but found '{actual_versification}'"
+    actual = get_versification_with_scoring(project_path)
+    assert actual == expected_versification, (
+        f"For '{project_folder_name}': expected '{expected_versification}', got '{actual}'"
+    )
 
 
-# --- Test get_book_names ---
-def test_get_book_names():
-    test_cases = [
-        ("abt-maprik", ["41MATabt.SFM", "46ROMabt.SFM", "67REVabt.SFM"]),
-        ("ahr", ["41MATahr.SFM","42MRKahr.SFM"]), 
-        ("eng-web-c", ["01GENeng.SFM", "02EXOeng.SFM", "08RUTeng.SFM", "781MAeng.SFM", "792MAeng.SFM"]),
-        ("eng-uk-lxx2012", ["101FRTeng.SFM"])
-    ]
+# --- Test get_destination_file_from_book ---
 
-    for folder_name, expected_filenames in test_cases:
-        project_folder = EBIBLE_DATA_PROJECTS / folder_name
-        if not project_folder.is_dir():
-            pytest.skip(f"Test project directory not found: {project_folder}")
+rename_test_cases = [
+    # (parent_folder,      input_filename,  expected_output_filename)
+    ("abt-maprik",         "MAT.usfm",      "41MATabt.SFM"),   # NT book: 40 + 1 = 41
+    ("abt-maprik",         "ROM.usfm",      "46ROMabt.SFM"),   # NT book: 45 + 1 = 46
+    ("abt-maprik",         "REV.usfm",      "67REVabt.SFM"),   # NT book: 66 + 1 = 67
+    ("eng-web-c",          "GEN.usfm",      "01GENeng.SFM"),   # OT book: 1 (unchanged)
+    ("eng-web-c",          "EXO.usfm",      "02EXOeng.SFM"),   # OT book: 2 (unchanged)
+    ("eng-web-c",          "RUT.usfm",      "08RUTeng.SFM"),   # OT book: 8 (unchanged)
+    ("eng-web-c",          "1MA.usfm",      "781MAeng.SFM"),   # DC book: 77 + 1 = 78
+    ("eng-web-c",          "2MA.usfm",      "792MAeng.SFM"),   # DC book: 78 + 1 = 79
+    ("eng-uk-lxx2012",     "FRT.usfm",      "101FRTeng.SFM"),  # non-OT book: 100 + 1 = 101
+]
 
-        filenames = set(file.name for file in project_folder.glob("*.SFM"))
-
-        for expected_filename in expected_filenames:
-            assert expected_filename in filenames, f"Missing {expected_filename} in {folder_name}"
+@pytest.mark.parametrize("folder, input_name, expected_name", rename_test_cases)
+def test_get_destination_file_from_book(folder, input_name, expected_name):
+    """Tests that USFM files are renamed to the Paratext NNBBBISO.SFM convention."""
+    result = get_destination_file_from_book(Path(folder) / input_name)
+    assert result is not None, f"Expected a result for {input_name} in {folder}"
+    assert result.name == expected_name, (
+        f"For {input_name} in {folder}: expected {expected_name}, got {result.name}"
+    )

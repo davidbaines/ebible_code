@@ -58,8 +58,9 @@ import regex
 import requests
 from bs4 import BeautifulSoup
 from machine.corpora import ParatextTextCorpus, create_versification_ref_corpus, extract_scripture_corpus
+from machine.scripture import VersificationType
 from rename_usfm import get_destination_file_from_book
-from settings_file import generate_vrs_from_project, write_settings_file 
+from settings_file import estimate_versification, generate_vrs_from_project, write_settings_file
 from tqdm import tqdm
 
 global headers
@@ -704,10 +705,18 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
                 # Continue to attempt settings file write; scoring will use fallback or default.
 
             # Write Settings.xml
-            # Unpack all return values, even if old/new dicts aren't used here yet
-            settings_path, vrs_num, _, _ = write_settings_file(project_dir, lang_code)
-            df.loc[index, 'status_inferred_versification'] = vrs_num # Store the inferred versification number
-            if settings_path: df.loc[index, 'status_settings_xml_date'] = TODAY_STR
+            vrs_type = estimate_versification(project_dir)
+            df.loc[index, 'status_inferred_versification'] = vrs_type.value
+            xml_vrs_type = VersificationType.ENGLISH if vrs_type == VersificationType.UNKNOWN else vrs_type
+            _lang = row.get('languageNameInEnglish', '')
+            _title = row.get('title', '')
+            success = write_settings_file(
+                project_dir, lang_code, xml_vrs_type,
+                language_name_in_english='' if pd.isna(_lang) else str(_lang),
+                full_name='' if pd.isna(_title) else str(_title),
+            )
+            if success:
+                df.loc[index, 'status_settings_xml_date'] = TODAY_STR
 
             # Extract Licence Details (only if needed or forced)
             if row['action_needed_licence']:
@@ -1065,19 +1074,25 @@ def update_all_settings(
                             # Continue, write_settings_file might handle missing .vrs with a default
 
                     root_logger.info(f"Updating settings for {translation_id} in {project_dir}")
-                    settings_path, vrs_num, old_vals, new_vals = write_settings_file(project_dir, lang_code)
+                    old_versification = row.get('status_inferred_versification')
+                    vrs_type = estimate_versification(project_dir)
+                    xml_vrs_type = VersificationType.ENGLISH if vrs_type == VersificationType.UNKNOWN else vrs_type
+                    _lang = row.get('languageNameInEnglish', '')
+                    _title = row.get('title', '')
+                    success = write_settings_file(
+                        project_dir, lang_code, xml_vrs_type,
+                        language_name_in_english='' if pd.isna(_lang) else str(_lang),
+                        full_name='' if pd.isna(_title) else str(_title),
+                    )
 
-                    if settings_path:
-                        # Use the original DataFrame and integer index to update
-                        status_df.loc[status_df['translationId'] == translation_id, 'status_inferred_versification'] = vrs_num
+                    if success:
+                        status_df.loc[status_df['translationId'] == translation_id, 'status_inferred_versification'] = vrs_type.value
                         status_df.loc[status_df['translationId'] == translation_id, 'status_settings_xml_date'] = TODAY_STR
-
-                        # Add data to report
                         report_entry = {
                             "translationId": translation_id,
-                            "settings_path": str(settings_path.resolve()),
-                            **old_vals,
-                            **new_vals,
+                            "settings_path": str((project_dir / "Settings.xml").resolve()),
+                            "old_versification": old_versification,
+                            "new_versification": vrs_type.value,
                         }
                         settings_report_data.append(report_entry)
                     else:

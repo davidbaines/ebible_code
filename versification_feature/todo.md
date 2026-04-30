@@ -42,20 +42,20 @@ Run `poetry run pytest` after every meaningful commit.
 
 ## Phase 3: Synthetic test fixtures and unit tests
 
-- [ ] 3.1 Create `tests/fixtures/versification/` directory
-- [ ] 3.2 Create `nt_only_invariant.vrs` — NT chapters, all invariant across standards
-- [ ] 3.3 Create `english_pattern.vrs` — differentiating chapters with English verse counts
-- [ ] 3.4 Create `vulgate_pattern.vrs` — differentiating chapters with Vulgate verse counts
-- [ ] 3.5 Create `russian_orthodox_pattern.vrs` — differentiating chapters with Russian Orthodox verse counts
-- [ ] 3.6 Create `high_mismatch.vrs` — differentiating chapters with verse counts matching no standard
-- [ ] 3.7 Write unit tests for module-level pre-computation (V1 in spec)
-- [ ] 3.8 Write parametrized unit tests for `estimate_versification()` using synthetic fixtures (V2 in spec)
-- [ ] 3.9 Write unit tests for `write_settings_file()`:
+- [x] 3.1 Create `tests/fixtures/versification/` directory
+- [x] 3.2 Create `nt_only_invariant.vrs` — NT chapters, all invariant across standards
+- [x] 3.3 Create `english_pattern.vrs` — differentiating chapters with English verse counts
+- [x] 3.4 Create `vulgate_pattern.vrs` — differentiating chapters with Vulgate verse counts
+- [x] 3.5 Create `russian_orthodox_pattern.vrs` — differentiating chapters with Russian Orthodox verse counts
+- [x] 3.6 Create `high_mismatch.vrs` — differentiating chapters with verse counts matching no standard
+- [x] 3.7 Write unit tests for module-level pre-computation (V1 in spec)
+- [x] 3.8 Write parametrized unit tests for `estimate_versification()` using synthetic fixtures (V2 in spec)
+- [x] 3.9 Write unit tests for `write_settings_file()`:
       - All VersificationType values 1–6: parse XML, assert correct <Versification> integer
       - Check <Language>, <FullName>, <Name> fields populated correctly
       - Invalid path returns False (V4 in spec)
-- [ ] 3.10 Update `test_settings_file.py` real-data parametrized tests to assert `VersificationType` enum instead of string (V3 in spec)
-- [ ] 3.11 Run `poetry run pytest` — all tests pass
+- [x] 3.10 Update `test_settings_file.py` real-data parametrized tests to assert `VersificationType` enum instead of string (V3 in spec)
+- [x] 3.11 Run `poetry run pytest` — all tests pass (67 passed, 3 skipped)
 
 ## Phase 4: Analysis script
 

@@ -1388,6 +1388,17 @@ def main() -> None:
         private_projects_folder
     )
 
+    # Report UNKNOWN versifications from this batch (value 0 = below VERSIFICATION_UNKNOWN_THRESHOLD)
+    unknown_vrs = actions_df[actions_df['status_inferred_versification'] == 0]
+    if not unknown_vrs.empty:
+        n = len(unknown_vrs)
+        root_logger.warning(
+            f"\nWARNING: {n} translation(s) have UNKNOWN versification (value 0).\n"
+            f"Settings.xml for these projects uses English (4) as a fallback.\n"
+            f"Review {status_path}, filtering for status_inferred_versification == 0.\n"
+            f"Run ebible_code/analyse_versification.py for detailed mismatch analysis."
+        )
+
     # Perform licence checks for existing projects if needed
     actions_df = check_and_update_licences(actions_df)
 

@@ -80,15 +80,19 @@ def load_and_filter_metadata(metadata_path: Path) -> pd.DataFrame:
 
 def validate_corpus_files(candidates: pd.DataFrame, ebible_data_dir: Path,
                           vref_length: int = VREF_LENGTH,
+                          min_lines: int = 400,
+                          min_chars: int = 7,
                           _input=input) -> tuple:
     """Clean and validate each candidate corpus file.
 
-    For each file: runs clean_range_markers in-place, checks it exists,
-    checks it has exactly vref_length lines.
+    For each file: runs clean_range_markers in-place, then checks:
+      1. File exists.
+      2. Line count == vref_length.
+      3. At least min_lines lines contain >= min_chars characters
+         (lines shorter than min_chars are treated as empty for this check).
 
-    Returns (valid_ids, skipped_ids) where each entry in skipped_ids is
-    (translationId, reason).  Prompts the user to continue if there are
-    failures; exits with code 1 if they decline.
+    Returns (valid_ids, skipped_ids). Prompts the user to continue if there
+    are failures; exits with code 1 if they decline.
     """
     valid_ids = []
     issues = []
@@ -107,10 +111,15 @@ def validate_corpus_files(candidates: pd.DataFrame, ebible_data_dir: Path,
             print(f"  Cleaned {cleaned} orphaned <range> marker(s) in {tid}", file=sys.stderr)
 
         with open(file_path, "r", encoding="utf-8") as f:
-            line_count = sum(1 for line in f)
+            lines = [line.rstrip("\r\n") for line in f]
 
-        if line_count != vref_length:
-            issues.append((tid, f"Line count {line_count} != expected {vref_length}"))
+        if len(lines) != vref_length:
+            issues.append((tid, f"Line count {len(lines)} != expected {vref_length}"))
+            continue
+
+        substantive = sum(1 for line in lines if len(line) >= min_chars)
+        if substantive < min_lines:
+            issues.append((tid, f"Only {substantive} lines with data (minimum {min_lines} required)"))
             continue
 
         valid_ids.append(tid)
@@ -152,10 +161,8 @@ def build_main_dataframe(vref_list: list, translation_data: dict) -> pd.DataFram
     alphabetically by translationId.
     """
     sorted_ids = sorted(translation_data.keys())
-    df = pd.DataFrame({"vref": vref_list})
-    for tid in sorted_ids:
-        df[tid] = translation_data[tid]
-    return df
+    data = {"vref": vref_list, **{tid: translation_data[tid] for tid in sorted_ids}}
+    return pd.DataFrame(data)
 
 
 def build_metadata_dataframe(full_metadata: pd.DataFrame, included_ids: list) -> pd.DataFrame:
@@ -244,8 +251,12 @@ def main():
     print(f"  {total_in_metadata} total translations, {len(candidates)} candidates (redistributable, extracted)")
 
     # Step 3: Pre-flight validation
+    min_lines = int(os.getenv("MINIMUM_LINES_IN_EXTRACT", "400"))
+    min_chars = int(os.getenv("MINIMUM_CHARACTERS_IN_VERSE", "7"))
     print("\n--- Validating corpus files ---")
-    valid_ids, skipped_ids = validate_corpus_files(candidates, ebible_data_dir, len(vref_list))
+    valid_ids, skipped_ids = validate_corpus_files(
+        candidates, ebible_data_dir, len(vref_list), min_lines, min_chars
+    )
     print(f"  {len(valid_ids)} valid, {len(skipped_ids)} skipped")
 
     if not valid_ids:

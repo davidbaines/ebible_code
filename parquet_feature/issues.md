@@ -14,7 +14,7 @@ Issues and questions that arose during implementation. Resolve before final rele
 - Remove the table entirely and point users to `metadata.parquet`.
 - Cap the table at N rows with a "... and N more" note.
 
-**Resolution needed from:** user.
+**Resolution needed from:** Remove the table entirely and point users to `metadata.parquet`.
 
 ---
 
@@ -40,7 +40,7 @@ These existed before any changes on this branch. They are tracked here for compl
 - Accept the double read (current, simpler code).
 - Combine validation and loading into a single pass (more complex, harder to test separately).
 
-**Resolution needed from:** performance testing on real corpus.
+**Resolution needed from:** Accept the double read (current, simpler code).
 
 ---
 
@@ -62,11 +62,15 @@ These existed before any changes on this branch. They are tracked here for compl
 - Add a `--non-interactive` / `--skip-issues` CLI flag that defaults to "continue" without prompting.
 - Document that automated callers should pipe `y` to stdin.
 
-**Resolution needed from:** user (when/if automation is needed).
+**Resolution needed from:** - Add a `--non-interactive` CLI flag that defaults to "continue" without prompting.
 
 ---
 
-## 6. `README_template.md` citation year
+## 6. Rename `README_template.md` to `parquet_README_template.md` to avoid confusion with the Github README.md replace references to `README_template.md` in the code with the new name.
+
+---
+
+## 7. `README_template.md` citation year
 
 **Issue:** The citation block in `assets/README_template.md` uses `{{{GENERATED_DATE}}}` for the year, which produces the full ISO date (`2026-04-30`) rather than just the year. The BibTeX `year` field conventionally takes a 4-digit year.
 
@@ -75,4 +79,4 @@ These existed before any changes on this branch. They are tracked here for compl
 - Extract the year from `GENERATED_DATE` in the render step.
 - Leave as-is (non-standard but harmless).
 
-**Resolution needed from:** user preference.
+**Resolution needed from:** Leave as-is (non-standard but harmless).

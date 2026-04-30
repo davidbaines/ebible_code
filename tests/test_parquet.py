@@ -15,7 +15,6 @@ from corpus_to_parquet import (
     validate_corpus_files,
     load_and_filter_metadata,
     load_translation_texts,
-    _make_licence_table,
 )
 
 # ---------------------------------------------------------------------------
@@ -198,7 +197,7 @@ def test_readme_translation_count():
 
 
 def test_readme_all_placeholders_replaced():
-    template_path = Path(__file__).parent.parent / "assets" / "README_template.md"
+    template_path = Path(__file__).parent.parent / "assets" / "parquet_README_template.md"
     if not template_path.exists():
         pytest.skip("README template not found")
     template = template_path.read_text(encoding="utf-8")
@@ -207,8 +206,6 @@ def test_readme_all_placeholders_replaced():
         "LANGUAGE_COUNT": 5,
         "VERSE_COUNT": VREF_LENGTH,
         "GENERATED_DATE": "2024-01-01",
-        "GENERATED_YEAR": 2024,
-        "LICENCE_TABLE": "| id | type |\n|---|---|\n| aaa | CC |",
     })
     assert "{{" not in result
 
@@ -227,7 +224,9 @@ def test_valid_files_pass(tmp_path):
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
     p = corpus_dir / "aaa-A.txt"
-    p.write_text("\n".join(["line"] * VREF_LENGTH) + "\n", encoding="utf-8")
+    # Use content long enough to pass the min_chars=7 check for 400+ lines
+    lines = ["verse text"] * 400 + [""] * (VREF_LENGTH - 400)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     candidates = _make_candidates({"aaa-A": p})
     valid, skipped = validate_corpus_files(candidates, tmp_path, VREF_LENGTH, _input=lambda _: "y")
     assert "aaa-A" in valid
@@ -239,7 +238,8 @@ def test_missing_file_skipped(tmp_path):
     corpus_dir.mkdir()
     missing = corpus_dir / "missing.txt"
     candidates = _make_candidates({"missing-X": missing})
-    valid, skipped = validate_corpus_files(candidates, tmp_path, VREF_LENGTH, _input=lambda _: "y")
+    valid, skipped = validate_corpus_files(candidates, tmp_path, VREF_LENGTH, min_lines=0,
+                                           _input=lambda _: "y")
     assert valid == []
     assert "missing-X" in skipped
 
@@ -250,9 +250,49 @@ def test_wrong_line_count_skipped(tmp_path):
     p = corpus_dir / "bad-B.txt"
     p.write_text("\n".join(["line"] * 100) + "\n", encoding="utf-8")
     candidates = _make_candidates({"bad-B": p})
-    valid, skipped = validate_corpus_files(candidates, tmp_path, VREF_LENGTH, _input=lambda _: "y")
+    valid, skipped = validate_corpus_files(candidates, tmp_path, VREF_LENGTH, min_lines=0,
+                                           _input=lambda _: "y")
     assert valid == []
     assert "bad-B" in skipped
+
+
+def test_insufficient_content_skipped(tmp_path):
+    """A file with correct line count but fewer than min_lines substantive lines is excluded."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    p = corpus_dir / "sparse-S.txt"
+    # Only 50 lines have content (>= 7 chars); rest are empty
+    lines = ["verse text"] * 50 + [""] * (VREF_LENGTH - 50)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    candidates = _make_candidates({"sparse-S": p})
+    valid, skipped = validate_corpus_files(candidates, tmp_path, VREF_LENGTH,
+                                           min_lines=400, min_chars=7, _input=lambda _: "y")
+    assert valid == []
+    assert "sparse-S" in skipped
+
+
+def test_min_chars_boundary(tmp_path):
+    """Lines with exactly min_chars characters count as substantive; shorter ones do not."""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    p = corpus_dir / "aaa-A.txt"
+    # 400 lines of exactly 7 chars, rest empty
+    lines = ["1234567"] * 400 + [""] * (VREF_LENGTH - 400)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    candidates = _make_candidates({"aaa-A": p})
+    valid, skipped = validate_corpus_files(candidates, tmp_path, VREF_LENGTH,
+                                           min_lines=400, min_chars=7, _input=lambda _: "y")
+    assert "aaa-A" in valid
+
+    # 400 lines of exactly 6 chars — should be excluded
+    p2 = corpus_dir / "bbb-B.txt"
+    lines2 = ["123456"] * 400 + [""] * (VREF_LENGTH - 400)
+    p2.write_text("\n".join(lines2) + "\n", encoding="utf-8")
+    candidates2 = _make_candidates({"bbb-B": p2})
+    valid2, skipped2 = validate_corpus_files(candidates2, tmp_path, VREF_LENGTH,
+                                             min_lines=400, min_chars=7, _input=lambda _: "y")
+    assert valid2 == []
+    assert "bbb-B" in skipped2
 
 
 def test_user_abort_on_issues(tmp_path):
@@ -261,7 +301,8 @@ def test_user_abort_on_issues(tmp_path):
     missing = corpus_dir / "gone.txt"
     candidates = _make_candidates({"gone-X": missing})
     with pytest.raises(SystemExit):
-        validate_corpus_files(candidates, tmp_path, VREF_LENGTH, _input=lambda _: "n")
+        validate_corpus_files(candidates, tmp_path, VREF_LENGTH, min_lines=0,
+                               _input=lambda _: "n")
 
 
 def test_clean_range_called_in_validation(tmp_path):
@@ -269,7 +310,8 @@ def test_clean_range_called_in_validation(tmp_path):
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
     p = corpus_dir / "aaa-A.txt"
-    lines = [""] + ["<range>"] + ["line"] * (VREF_LENGTH - 2)
+    # Use content that passes content check: 400 substantive lines
+    lines = [""] + ["<range>"] + ["verse text"] * 400 + [""] * (VREF_LENGTH - 402)
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
     candidates = _make_candidates({"aaa-A": p})
     validate_corpus_files(candidates, tmp_path, VREF_LENGTH, _input=lambda _: "y")

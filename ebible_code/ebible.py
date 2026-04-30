@@ -240,6 +240,34 @@ def scan_corpus_file(extract_path: Path) -> Optional[tuple[str, str]]:
     return None
 
 
+def clean_range_markers(file_path: Path) -> int:
+    """Remove orphaned <range> markers from a corpus .txt file in-place.
+
+    A <range> marker is orphaned when its immediately preceding line is empty.
+    Processing top-to-bottom means cascading chains are handled automatically:
+    once an orphaned <range> is replaced with "", the next <range> in the chain
+    also sees "" as its predecessor and is replaced.
+
+    Returns the number of replacements made.
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
+        lines = [line.rstrip("\r\n") for line in f]
+
+    replacements = 0
+    for i in range(len(lines)):
+        if lines[i] == "<range>":
+            prev = lines[i - 1] if i > 0 else ""
+            if prev == "":
+                lines[i] = ""
+                replacements += 1
+
+    if replacements:
+        with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines) + "\n")
+
+    return replacements
+
+
 # --- Core Logic Functions ---
 
 def initialize_or_load_status(status_path: Path, translations_path: Path) -> pd.DataFrame:
@@ -973,6 +1001,9 @@ def extract_and_finalize_texts(
         )
 
         if success:
+            cleaned = clean_range_markers(output_file_path)
+            if cleaned:
+                root_logger.debug(f"Cleaned {cleaned} orphaned <range> marker(s) in {output_file_path.name}")
             df.loc[index, 'status_extract_path'] = str(output_file_path.resolve())
             df.loc[index, 'status_extract_date'] = TODAY_STR
             df.loc[index, 'status_last_error'] = np.nan # Clear error on success

@@ -172,18 +172,6 @@ def build_metadata_dataframe(full_metadata: pd.DataFrame, included_ids: list) ->
     return df
 
 
-def _make_licence_table(metadata_df: pd.DataFrame) -> str:
-    """Build a Markdown table of translation licence info."""
-    cols = ["translationId", "licence_Licence_Type", "licence_CC_Licence_Link"]
-    present = [c for c in cols if c in metadata_df.columns]
-    rows = ["| " + " | ".join(present) + " |",
-            "| " + " | ".join("---" for _ in present) + " |"]
-    for _, row in metadata_df[present].iterrows():
-        cells = [str(row[c]) if pd.notna(row[c]) else "" for c in present]
-        rows.append("| " + " | ".join(cells) + " |")
-    return "\n".join(rows)
-
-
 def render_readme(template: str, stats: dict) -> str:
     """Replace {{PLACEHOLDER}} markers in template with values from stats dict."""
     result = template
@@ -228,7 +216,7 @@ def main():
     main_parquet_path = hf_output_dir / os.getenv("HUGGINGFACE_MAIN_PARQUET_FILENAME", "main.parquet")
     metadata_parquet_path = hf_output_dir / os.getenv("HUGGINGFACE_METADATA_PARQUET_FILENAME", "metadata.parquet")
     readme_path = hf_output_dir / "README.md"
-    template_path = Path(__file__).parent.parent / "assets" / "README_template.md"
+    template_path = Path(__file__).parent.parent / "assets" / "parquet_README_template.md"
 
     for path, label in [(vref_path, "VREF_FILENAME"), (metadata_path, "METADATA_FILENAME")]:
         if not path.exists():
@@ -282,7 +270,6 @@ def main():
     # Step 6: Generate README.md
     print("\n--- Generating README.md ---")
     language_count = metadata_df["languageCode"].nunique() if "languageCode" in metadata_df.columns else "?"
-    licence_table = _make_licence_table(metadata_df)
 
     if template_path.exists():
         template = template_path.read_text(encoding="utf-8")
@@ -291,14 +278,11 @@ def main():
               file=sys.stderr)
         template = "# eBible Parallel Corpus\n\nGenerated: {{GENERATED_DATE}}\n"
 
-    today = date.today()
     readme_content = render_readme(template, {
         "TRANSLATION_COUNT": len(valid_ids),
         "LANGUAGE_COUNT": language_count,
         "VERSE_COUNT": len(vref_list),
-        "GENERATED_DATE": today.isoformat(),
-        "GENERATED_YEAR": today.year,
-        "LICENCE_TABLE": licence_table,
+        "GENERATED_DATE": date.today().isoformat(),
     })
     readme_path.write_text(readme_content, encoding="utf-8")
     print(f"  Written: {readme_path}")

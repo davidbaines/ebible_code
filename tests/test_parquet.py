@@ -15,7 +15,6 @@ from corpus_to_parquet import (
     validate_corpus_files,
     load_and_filter_metadata,
     load_translation_texts,
-    _make_licence_table,
 )
 
 # ---------------------------------------------------------------------------
@@ -198,7 +197,7 @@ def test_readme_translation_count():
 
 
 def test_readme_all_placeholders_replaced():
-    template_path = Path(__file__).parent.parent / "assets" / "README_template.md"
+    template_path = Path(__file__).parent.parent / "assets" / "parquet_README_template.md"
     if not template_path.exists():
         pytest.skip("README template not found")
     template = template_path.read_text(encoding="utf-8")
@@ -207,8 +206,6 @@ def test_readme_all_placeholders_replaced():
         "LANGUAGE_COUNT": 5,
         "VERSE_COUNT": VREF_LENGTH,
         "GENERATED_DATE": "2024-01-01",
-        "GENERATED_YEAR": 2024,
-        "LICENCE_TABLE": "| id | type |\n|---|---|\n| aaa | CC |",
     })
     assert "{{" not in result
 

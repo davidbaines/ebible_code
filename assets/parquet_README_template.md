@@ -88,9 +88,7 @@ nt_start = ds.filter(lambda row: row["vref"].startswith("MAT"))
 
 ## Licence Breakdown
 
-All translations in this dataset are redistributable as confirmed by eBible.org. Individual licence terms vary by translation. Consult `metadata.parquet` for per-translation licence details.
-
-{{LICENCE_TABLE}}
+All translations in this dataset are redistributable as confirmed by eBible.org. Individual licence terms vary by translation. For per-translation licence details — including licence type, version, CC link, copyright holder, and translating organisation — load `metadata.parquet`.
 
 ## Citation
 
@@ -101,6 +99,6 @@ If you use this dataset in your work, please cite eBible.org:
   title  = {eBible.org Parallel Corpus},
   author = {eBible.org contributors},
   url    = {https://ebible.org},
-  year   = {{{GENERATED_YEAR}}}
+  year   = {{{GENERATED_DATE}}}
 }
 ```

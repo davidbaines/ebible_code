@@ -17,7 +17,7 @@ Consult spec.md before every change. Check off tasks as completed. Run tests aft
 
 ## Phase 2 — Assets
 
-- [x] Create `assets/README_template.md` with all 5 placeholders defined in spec
+- [x] Create `assets/parquet_README_template.md` with placeholders defined in spec
   - [x] YAML frontmatter for HuggingFace
   - [x] Static prose sections (description, structure, fields, licence, citation)
 
@@ -65,4 +65,24 @@ Consult spec.md before every change. Check off tasks as completed. Run tests aft
   - [x] Fix BibTeX year field in README_template.md (add {{GENERATED_YEAR}} placeholder)
   - [x] Fix spec.md verification table test name (test_metadata_columns → test_metadata_columns_order)
   - [x] Add GENERATED_YEAR to render_readme call and test coverage
-- [ ] Resolve open items in issues.md with user
+- [x] Resolve open items in issues.md with user
+
+## Phase 6 — Issues 1 and 6
+
+- [x] Issue 1: Remove LICENCE_TABLE from README
+  - [x] Remove `{{LICENCE_TABLE}}` placeholder from `assets/parquet_README_template.md`
+  - [x] Replace with prose pointing users to `metadata.parquet`
+  - [x] Remove `_make_licence_table()` and `LICENCE_TABLE` from `corpus_to_parquet.py`
+  - [x] Update tests to remove `LICENCE_TABLE` from fixtures
+  - [x] Run tests — 28/28 pass
+
+- [x] Issue 6: Rename template file and update references
+  - [x] Rename `assets/README_template.md` → `assets/parquet_README_template.md` (done by user)
+  - [x] Update `corpus_to_parquet.py` template path reference
+  - [x] Update `tests/test_parquet.py` template path reference
+  - [x] Run tests — 28/28 pass
+
+- [x] Issue 7 (revert): Revert `{{GENERATED_YEAR}}` back to `{{GENERATED_DATE}}` per "leave as-is" decision
+  - [x] Revert `assets/parquet_README_template.md` citation year placeholder
+  - [x] Remove `GENERATED_YEAR` from render_readme call in `corpus_to_parquet.py`
+  - [x] Update test fixture

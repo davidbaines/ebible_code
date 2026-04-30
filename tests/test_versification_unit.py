@@ -19,6 +19,7 @@ from ebible_code.settings_file import (
     estimate_versification,
     write_settings_file,
 )
+from ebible_code.analyse_versification import describe_versification_match
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "versification"
 
@@ -118,6 +119,25 @@ def test_estimate_versification_nonexistent_folder(tmp_path):
     # Folder doesn't exist
     result = estimate_versification(proj_dir)
     assert result == VersificationType.ENGLISH
+
+
+status_cases = [
+    ("nt_only_invariant.vrs",        "0.0", "indistinguishable"),
+    ("english_pattern.vrs",          "0.0", "matched"),
+    ("vulgate_pattern.vrs",          "0.0", "matched"),
+    ("russian_orthodox_pattern.vrs", "0.0", "matched"),
+    ("high_mismatch.vrs",            "0.3", "unknown"),
+]
+
+@pytest.mark.parametrize("fixture_name, threshold, expected_status", status_cases)
+def test_describe_versification_match_status(fixture_name, threshold, expected_status,
+                                              project_from_fixture, monkeypatch):
+    monkeypatch.setenv("VERSIFICATION_UNKNOWN_THRESHOLD", threshold)
+    proj_dir = project_from_fixture(fixture_name)
+    report = describe_versification_match(proj_dir)
+    assert report.status == expected_status, (
+        f"Fixture '{fixture_name}': expected status={expected_status!r}, got {report.status!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

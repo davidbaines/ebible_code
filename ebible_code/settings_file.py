@@ -140,18 +140,21 @@ def compute_versification_scores(
       'project_differentiating_chapters': Set[Tuple[str, int]]
       'total_project_chapters': int
     """
-    # Exclude (a) invariant chapters, and (b) chapters where the project reports
-    # max_verse=1 but any standard has more — these are Versification.load() placeholder
-    # entries for books absent from the project's .vrs file.
+    # Exclude spurious Versification.load() placeholder chapters: entries where the project
+    # has max_verse=1 but at least one standard has more. These arise because Versification.load()
+    # fills placeholder (chapter 1, verse 1) for all 66 canonical books not in the .vrs file.
+    spurious_chapters: Set[Tuple[str, int]] = {
+        bc for bc in project_verse_data
+        if project_verse_data[bc] == 1
+        and any(std.get(bc, 0) > 1 for std in STANDARD_VERSE_DATA.values())
+    }
+    # Differentiating chapters: non-invariant, non-spurious chapters that can distinguish standards.
     project_differentiating_chapters: Set[Tuple[str, int]] = {
         bc for bc in project_verse_data
-        if bc not in INVARIANT_CHAPTERS
-        and not (
-            project_verse_data[bc] == 1
-            and any(std.get(bc, 0) > 1 for std in STANDARD_VERSE_DATA.values())
-        )
+        if bc not in INVARIANT_CHAPTERS and bc not in spurious_chapters
     }
-    total_project_chapters = len(project_verse_data)
+    # Valid chapters = all project chapters excluding spurious placeholders.
+    total_project_chapters = len(project_verse_data) - len(spurious_chapters)
     n = len(project_differentiating_chapters)
 
     scores: Dict[VersificationType, float] = {}

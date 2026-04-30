@@ -60,16 +60,17 @@ Run `poetry run pytest` after every meaningful commit.
 ## Phase 4: Analysis script
 
 - [ ] 4.1 Create `ebible_code/analyse_versification.py`
-- [ ] 4.2 Define `VersificationMatchReport` dataclass here (not in settings_file.py)
-- [ ] 4.3 Implement `describe_versification_match(project_path) -> VersificationMatchReport`
+- [x] 4.2 Define `VersificationMatchReport` dataclass here (not in settings_file.py)
+- [x] 4.3 Implement `describe_versification_match(project_path) -> VersificationMatchReport`
       — imports scoring internals from settings_file.py; consistent with estimate_versification()
       — generates `notes` string per spec §notes generation rules
-- [ ] 4.4 Implement project scanning (projects/ and private_projects/ from EBIBLE_DATA_DIR)
-- [ ] 4.5 Implement CSV output (flattened VersificationMatchReport; one score column per VersificationType)
-- [ ] 4.6 Implement histogram PNG (matplotlib; vertical line at current threshold)
-- [ ] 4.7 Implement stdout summary (total, score bands 0.0–1.0 in 0.1 steps, indistinguishable count, below-threshold count)
-- [ ] 4.8 Write test: run against TEST_EBIBLE_DATA_DIR, assert CSV + PNG created and non-empty (V6 in spec)
-- [ ] 4.9 Run `poetry run pytest` — all tests pass
+- [x] 4.4 Implement project scanning (projects/ and private_projects/ from EBIBLE_DATA_DIR)
+- [x] 4.5 Implement CSV output (flattened VersificationMatchReport; one score column per VersificationType)
+- [x] 4.6 Implement histogram PNG (matplotlib; vertical line at current threshold)
+- [x] 4.7 Implement stdout summary (total, score bands 0.0–1.0 in 0.1 steps, indistinguishable count, below-threshold count)
+- [x] 4.8 Write test: run against TEST_EBIBLE_DATA_DIR, assert CSV + PNG created and non-empty (V6 in spec)
+- [x] 4.9 Run `poetry run pytest` — all tests pass
+      - Fixed typo "Versionification", inflated chapter count in indistinguishable notes, spec.md spurious-chapter filter documentation, and added describe_versification_match() status assertions to V2 tests
 
 ## Phase 5: Threshold calibration (requires user input)
 

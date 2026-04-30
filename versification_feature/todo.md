@@ -74,10 +74,12 @@ Run `poetry run pytest` after every meaningful commit.
 
 ## Phase 5: Threshold calibration (requires user input)
 
-- [ ] 5.1 Run `poetry run python ebible_code/analyse_versification.py` against full data
-- [ ] 5.2 Review histogram and CSV with user; identify natural breakpoint in score distribution
-- [ ] 5.3 Set `VERSIFICATION_UNKNOWN_THRESHOLD` in `.env` to chosen value
-- [ ] 5.4 Re-run tests with threshold set; confirm UNKNOWN cases are correctly identified
+- [x] 5.1 Run `poetry run python ebible_code/analyse_versification.py` against full data
+- [x] 5.2 Review histogram and CSV with user; identify natural breakpoint in score distribution
+      - Clear gap at 0.1–0.3 (zero projects); 94% score ≥ 0.9; low-scoring tail are partial Bibles
+- [x] 5.3 Set `VERSIFICATION_UNKNOWN_THRESHOLD` in `.env` to chosen value
+      - Set to 0.8; flags 34 projects as UNKNOWN; 1441 matched; 21 indistinguishable
+- [x] 5.4 Re-run tests with threshold set; confirm UNKNOWN cases are correctly identified
 
 ## Phase 6: Final validation
 

@@ -1,0 +1,7 @@
+# Synthetic fixture: differentiating chapters with verse counts that uniquely match VULGATE.
+# 1CH 11: VULGATE=46, all others=47
+# 1CH 20: VULGATE=7, all others=8
+# 1MA 1:  VULGATE=67, all others=64 (RUSSIAN_PROTESTANT absent)
+# estimate_versification() should return VULGATE.
+1CH 11:46 20:7
+1MA 1:67

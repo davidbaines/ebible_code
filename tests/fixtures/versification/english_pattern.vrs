@@ -1,0 +1,9 @@
+# Synthetic fixture: differentiating chapters with verse counts that uniquely match ENGLISH.
+# 1SA 23: ENGLISH=29, all others=28
+# 1SA 24: ENGLISH=22, all others=23
+# 2CO 13: ENGLISH=14, all others=13
+# ACT 19: ENGLISH=41, all others=40
+# estimate_versification() should return ENGLISH.
+1SA 23:29 24:22
+2CO 13:14
+ACT 19:41

@@ -251,7 +251,7 @@ def main() -> None:
     indistinguishable = sum(1 for r in reports if r.status == "indistinguishable")
     below_threshold = sum(1 for r in reports if r.status == "unknown")
 
-    print(f"\nVersionification analysis complete.")
+    print("\nVersification analysis complete.")
     print(f"Total projects analysed: {total}")
     print("\nScore distribution (best_score bands):")
     for i in range(10):

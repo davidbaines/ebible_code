@@ -1,443 +1,316 @@
+"""Convert eBible corpus .txt files to Parquet format for HuggingFace.
+
+Configuration is via .env — run with --help for details.
+"""
+
+import argparse
 import os
-import re
 import sys
-from dotenv import load_dotenv
+from datetime import date
 from pathlib import Path
+
 import pandas as pd
-import pyarrow
+from dotenv import load_dotenv
 from tqdm import tqdm
 
-# --- Script Logic ---
+sys.path.insert(0, str(Path(__file__).parent))
+from ebible import clean_range_markers
+
+# Columns included in metadata.parquet, in order.
+# status_inferred_versification is renamed to inferred_versification on output.
+METADATA_SOURCE_COLUMNS = [
+    # All ORIGINAL_COLUMNS from ebible_status.csv
+    "languageCode", "translationId", "languageName", "languageNameInEnglish", "dialect",
+    "homeDomain", "title", "description", "Redistributable", "Copyright", "UpdateDate",
+    "publicationURL", "OTbooks", "OTchapters", "OTverses", "NTbooks", "NTchapters",
+    "NTverses", "DCbooks", "DCchapters", "DCverses", "FCBHID", "Certified", "inScript",
+    "swordName", "rodCode", "textDirection", "downloadable", "font", "shortTitle",
+    "PODISBN", "script", "sourceDate",
+    # Selected LICENCE_COLUMNS
+    "licence_Vernacular_Title", "licence_Licence_Type", "licence_Licence_Version",
+    "licence_CC_Licence_Link", "licence_Copyright_Holder", "licence_Copyright_Years",
+    "licence_Translation_by",
+    # STATUS: versification only
+    "status_inferred_versification",
+]
+
+VREF_LENGTH = 41899
 
 
-def parse_vref(vref_line):
-    """Parses a vref line (e.g., 'GEN 1:1') into book, chapter, verse."""
-    match = re.match(r"(\w{3})\s+(\d{1,3}):(\d{1,3})", vref_line)
-    if match:
-        return match.groups()  # Returns (book, chapter, verse) as strings
-    else:
-        # Handle potential malformed lines if necessary, or return None/raise error
-        print(f"Warning: Could not parse vref line: '{vref_line}'", file=sys.stderr)
-        return None, None, None
+def build_vref_list(vref_path: Path) -> list:
+    """Read vref.txt and return a list of verse reference strings like 'GEN 1:1'."""
+    with open(vref_path, "r", encoding="utf-8") as f:
+        lines = [line.strip() for line in f if line.strip()]
+    if not lines:
+        raise ValueError(f"vref file is empty: {vref_path}")
+    return lines
+
+
+def load_and_filter_metadata(metadata_path: Path) -> pd.DataFrame:
+    """Load ebible_status.csv, filter to redistributable non-private extracted translations.
+
+    Warns for rows where only one of status_extract_date / status_extract_hash is set.
+    Returns rows where both fields are populated and path is not private_corpus.
+    """
+    df = pd.read_csv(metadata_path, keep_default_na=False, dtype={"Redistributable": str})
+
+    required = ["translationId", "status_extract_path", "Redistributable",
+                "status_extract_date", "status_extract_hash"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Metadata CSV missing required columns: {', '.join(missing)}")
+
+    df = df[df["Redistributable"] == "True"].copy()
+    df["status_extract_path"] = df["status_extract_path"].astype(str)
+    df = df[~df["status_extract_path"].str.contains("private_corpus", case=False, na=False)]
+    df = df[df["status_extract_path"].notna() & (df["status_extract_path"] != "")]
+
+    has_date = df["status_extract_date"].notna() & (df["status_extract_date"] != "")
+    has_hash = df["status_extract_hash"].notna() & (df["status_extract_hash"] != "")
+
+    for _, row in df[has_date & ~has_hash].iterrows():
+        print(f"Warning: {row['translationId']} has status_extract_date but no status_extract_hash",
+              file=sys.stderr)
+    for _, row in df[~has_date & has_hash].iterrows():
+        print(f"Warning: {row['translationId']} has status_extract_hash but no status_extract_date",
+              file=sys.stderr)
+
+    return df[has_date & has_hash].copy()
+
+
+def validate_corpus_files(candidates: pd.DataFrame, ebible_data_dir: Path,
+                          vref_length: int = VREF_LENGTH,
+                          _input=input) -> tuple:
+    """Clean and validate each candidate corpus file.
+
+    For each file: runs clean_range_markers in-place, checks it exists,
+    checks it has exactly vref_length lines.
+
+    Returns (valid_ids, skipped_ids) where each entry in skipped_ids is
+    (translationId, reason).  Prompts the user to continue if there are
+    failures; exits with code 1 if they decline.
+    """
+    valid_ids = []
+    issues = []
+
+    for _, row in tqdm(candidates.iterrows(), total=len(candidates), desc="Validating corpus files"):
+        tid = row["translationId"]
+        path_str = row["status_extract_path"]
+        file_path = Path(path_str) if Path(path_str).is_absolute() else ebible_data_dir / path_str
+
+        if not file_path.exists():
+            issues.append((tid, f"File not found: {file_path}"))
+            continue
+
+        cleaned = clean_range_markers(file_path)
+        if cleaned:
+            print(f"  Cleaned {cleaned} orphaned <range> marker(s) in {tid}", file=sys.stderr)
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            line_count = sum(1 for line in f)
+
+        if line_count != vref_length:
+            issues.append((tid, f"Line count {line_count} != expected {vref_length}"))
+            continue
+
+        valid_ids.append(tid)
+
+    if issues:
+        print(f"\n{len(issues)} file(s) have issues:")
+        for tid, reason in issues:
+            print(f"  {tid}: {reason}")
+        answer = _input(f"\n{len(issues)} file(s) have issues. Continue anyway and skip them? [y/N]: ")
+        if answer.strip().lower() != "y":
+            print("Aborted.")
+            sys.exit(1)
+
+    return valid_ids, [tid for tid, _ in issues]
+
+
+def load_translation_texts(candidates: pd.DataFrame, valid_ids: list,
+                           ebible_data_dir: Path) -> dict:
+    """Load the text lines for each valid translation. Returns {translationId: [lines]}."""
+    valid_set = set(valid_ids)
+    data = {}
+    for _, row in tqdm(
+        candidates[candidates["translationId"].isin(valid_set)].iterrows(),
+        total=len(valid_ids),
+        desc="Loading translations",
+    ):
+        tid = row["translationId"]
+        path_str = row["status_extract_path"]
+        file_path = Path(path_str) if Path(path_str).is_absolute() else ebible_data_dir / path_str
+        with open(file_path, "r", encoding="utf-8") as f:
+            data[tid] = [line.rstrip("\r\n") for line in f]
+    return data
+
+
+def build_main_dataframe(vref_list: list, translation_data: dict) -> pd.DataFrame:
+    """Build the wide-format main DataFrame.
+
+    First column is 'vref'. Remaining columns are translations sorted
+    alphabetically by translationId.
+    """
+    sorted_ids = sorted(translation_data.keys())
+    df = pd.DataFrame({"vref": vref_list})
+    for tid in sorted_ids:
+        df[tid] = translation_data[tid]
+    return df
+
+
+def build_metadata_dataframe(full_metadata: pd.DataFrame, included_ids: list) -> pd.DataFrame:
+    """Build the metadata DataFrame for included translations only.
+
+    Selects the columns defined in METADATA_SOURCE_COLUMNS (skipping any absent),
+    then renames status_inferred_versification -> inferred_versification.
+    """
+    df = full_metadata[full_metadata["translationId"].isin(set(included_ids))].copy()
+    present = [c for c in METADATA_SOURCE_COLUMNS if c in df.columns]
+    df = df[present].copy()
+    if "status_inferred_versification" in df.columns:
+        df = df.rename(columns={"status_inferred_versification": "inferred_versification"})
+    return df
+
+
+def _make_licence_table(metadata_df: pd.DataFrame) -> str:
+    """Build a Markdown table of translation licence info."""
+    cols = ["translationId", "licence_Licence_Type", "licence_CC_Licence_Link"]
+    present = [c for c in cols if c in metadata_df.columns]
+    rows = ["| " + " | ".join(present) + " |",
+            "| " + " | ".join("---" for _ in present) + " |"]
+    for _, row in metadata_df[present].iterrows():
+        cells = [str(row[c]) if pd.notna(row[c]) else "" for c in present]
+        rows.append("| " + " | ".join(cells) + " |")
+    return "\n".join(rows)
+
+
+def render_readme(template: str, stats: dict) -> str:
+    """Replace {{PLACEHOLDER}} markers in template with values from stats dict."""
+    result = template
+    for key, value in stats.items():
+        result = result.replace("{{" + key + "}}", str(value))
+    return result
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert eBible corpus .txt files to Parquet format for HuggingFace.\n\n"
+            "All paths are configured via .env:\n"
+            "  EBIBLE_DATA_DIR              Root of the data repository\n"
+            "  VREF_FILENAME                Filename of vref.txt under metadata/\n"
+            "  METADATA_FILENAME            Filename of ebible_status.csv under metadata/\n"
+            "  HUGGINGFACE_OUTPUT_FOLDER    Output directory for all output files\n"
+            "  HUGGINGFACE_MAIN_PARQUET_FILENAME     e.g. main.parquet\n"
+            "  HUGGINGFACE_METADATA_PARQUET_FILENAME e.g. metadata.parquet\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    return parser.parse_args()
 
 
 def main():
-    """Main function to prepare the Hugging Face dataset."""
-
-    # 1. Get EBIBLE_DATA_DIR environment variable
+    _parse_args()
     load_dotenv()
 
     ebible_data_dir_str = os.getenv("EBIBLE_DATA_DIR")
     if not ebible_data_dir_str:
-        print(
-            "Error: Environment variable EBIBLE_DATA_DIR is not set.", file=sys.stderr
-        )
-        print(
-            "Please set it to the path of your ebible_data repository.", file=sys.stderr
-        )
+        print("Error: EBIBLE_DATA_DIR is not set in .env", file=sys.stderr)
         sys.exit(1)
-
     ebible_data_dir = Path(ebible_data_dir_str)
     if not ebible_data_dir.is_dir():
-        print(
-            f"Error: EBIBLE_DATA_DIR path does not exist or is not a directory: {ebible_data_dir}",
-            file=sys.stderr,
-        )
+        print(f"Error: EBIBLE_DATA_DIR does not exist: {ebible_data_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # 2. Construct necessary paths
-    vref_path = ebible_data_dir / "metadata" / os.getenv("VREF_FILENAME")
-    metadata_path = ebible_data_dir / "metadata" / os.getenv("METADATA_FILENAME")
+    vref_path = ebible_data_dir / "metadata" / os.getenv("VREF_FILENAME", "vref.txt")
+    metadata_path = ebible_data_dir / "metadata" / os.getenv("METADATA_FILENAME", "ebible_status.csv")
+    hf_output_dir = ebible_data_dir / os.getenv("HUGGINGFACE_OUTPUT_FOLDER", "huggingface")
+    main_parquet_path = hf_output_dir / os.getenv("HUGGINGFACE_MAIN_PARQUET_FILENAME", "main.parquet")
+    metadata_parquet_path = hf_output_dir / os.getenv("HUGGINGFACE_METADATA_PARQUET_FILENAME", "metadata.parquet")
+    readme_path = hf_output_dir / "README.md"
+    template_path = Path(__file__).parent.parent / "assets" / "README_template.md"
 
-    hf_output_dir = ebible_data_dir / (os.getenv("HUGGINGFACE_OUTPUT_FOLDER"))
+    for path, label in [(vref_path, "VREF_FILENAME"), (metadata_path, "METADATA_FILENAME")]:
+        if not path.exists():
+            print(f"Error: {label} not found: {path}", file=sys.stderr)
+            sys.exit(1)
 
     if not hf_output_dir.is_dir():
-        print(f"Error: Could not find HUGGINGFACE_OUTPUT_FOLDER: {hf_output_dir}.")
+        print(f"Error: HUGGINGFACE_OUTPUT_FOLDER does not exist: {hf_output_dir}", file=sys.stderr)
         sys.exit(1)
 
-    hf_main_parquet_file = hf_output_dir / os.getenv(
-        "HUGGINGFACE_MAIN_PARQUET_FILENAME"
-    )
-    hf_metadata_parquet_file = hf_output_dir / os.getenv(
-        "HUGGINGFACE_METADATA_PARQUET_FILENAME"
-    )
+    # Step 1: Load vref
+    print("--- Loading vref ---")
+    vref_list = build_vref_list(vref_path)
+    print(f"  {len(vref_list)} verse references loaded")
 
-    print(f"Using EBIBLE_DATA_DIR:           {ebible_data_dir}")
-    print(f"Reading vref from:               {vref_path}")
-    print(f"Reading metadata from:           {metadata_path}")
-    print(f"Output folder for parquet files: {hf_output_dir}")
-
-    # 3. Load and parse vref.txt
-    print("\n--- Loading vref.txt ---")
+    # Step 2: Load and filter metadata
+    print("\n--- Loading metadata ---")
+    full_metadata_df = pd.read_csv(metadata_path, keep_default_na=False, dtype={"Redistributable": str})
+    total_in_metadata = len(full_metadata_df)
     try:
-        with open(vref_path, "r", encoding="utf-8") as f_vref:
-            vref_lines = [
-                line.strip() for line in f_vref if line.strip()
-            ]  # Read non-empty lines
-        vref_length = len(vref_lines)
-        print(f"Successfully read {vref_length} verse references.")
-
-        if vref_length == 0:
-            print(
-                "Error: vref.txt is empty or contains only whitespace.", file=sys.stderr
-            )
-            sys.exit(1)
-
-        # Parse vref lines into components
-        parsed_vrefs = [parse_vref(line) for line in vref_lines]
-        books, chapters, verses = zip(
-            *[(b, c, v) for b, c, v in parsed_vrefs if b is not None]
-        )  # Filter out failed parses
-
-        # Check if parsing failed for some lines
-        if len(books) != vref_length:
-            print(
-                f"Warning: {vref_length - len(books)} vref lines could not be parsed.",
-                file=sys.stderr,
-            )
-            # Decide if this is critical - for now, we proceed with parsed lines
-            # If strict matching is needed, you might want to exit here.
-
-        # Create the initial DataFrame
-        df = pd.DataFrame(
-            {
-                "book": list(books),
-                "chapter": pd.to_numeric(chapters),  # Convert chapters to numeric
-                "verse": pd.to_numeric(verses),  # Convert verses to numeric
-            }
-        )
-        # Use the original vref_lines as index if needed later, or just rely on row number
-        # df.index = vref_lines[:len(df)] # Assign only if lengths match after filtering bad parses
-
-    except FileNotFoundError:
-        print(f"Error: vref.txt not found at {vref_path}", file=sys.stderr)
+        candidates = load_and_filter_metadata(metadata_path)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except Exception as e:
-        print(f"Error reading or parsing {vref_path}: {e}", file=sys.stderr)
+    print(f"  {total_in_metadata} total translations, {len(candidates)} candidates (redistributable, extracted)")
+
+    # Step 3: Pre-flight validation
+    print("\n--- Validating corpus files ---")
+    valid_ids, skipped_ids = validate_corpus_files(candidates, ebible_data_dir, len(vref_list))
+    print(f"  {len(valid_ids)} valid, {len(skipped_ids)} skipped")
+
+    if not valid_ids:
+        print("Error: No valid translations to include.", file=sys.stderr)
         sys.exit(1)
 
-    # 4. Load and filter metadata
-    print("\n--- Loading Metadata ---")
-    try:
-        metadata_df = pd.read_csv(
-            metadata_path, keep_default_na=False, dtype={"Redistributable": str}
-        )  # Read Redistributable as string
-        print(f"Read {len(metadata_df)} total metadata entries.")
+    # Step 4: Load text and build main.parquet
+    print("\n--- Loading translation texts ---")
+    translation_data = load_translation_texts(candidates, valid_ids, ebible_data_dir)
 
-        # --- Filtering ---
-        # 1. Check required columns exist
-        required_cols = [
-            "translationId",
-            "status_extract_path",
-            "Redistributable",
-            "status_extract_date",
-            "status_extract_hash",
-        ]
-        missing_cols = [col for col in required_cols if col not in metadata_df.columns]
-        if missing_cols:
-            print(
-                f"Error: Metadata CSV missing required columns: {', '.join(missing_cols)}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+    print("\n--- Building main.parquet ---")
+    main_df = build_main_dataframe(vref_list, translation_data)
+    main_df.to_parquet(main_parquet_path, index=False, engine="pyarrow", compression="snappy")
+    print(f"  Written: {main_parquet_path} ({len(main_df)} rows × {len(main_df.columns)} columns)")
 
-        # 2. Filter by Redistributable == "True" (case-sensitive string comparison)
-        filtered_df = metadata_df[metadata_df["Redistributable"] == "True"].copy()
-        print(f"Found {len(filtered_df)} redistributable translations.")
+    # Step 5: Build metadata.parquet
+    print("\n--- Building metadata.parquet ---")
+    metadata_df = build_metadata_dataframe(full_metadata_df, valid_ids)
+    metadata_df.to_parquet(metadata_parquet_path, index=False, engine="pyarrow", compression="snappy")
+    print(f"  Written: {metadata_parquet_path} ({len(metadata_df)} rows)")
 
-        # 3. Filter out entries where path contains 'private_corpus'
-        # Ensure status_extract_path is treated as string
-        filtered_df["status_extract_path"] = filtered_df["status_extract_path"].astype(
-            str
-        )
-        original_count = len(filtered_df)
-        filtered_df = filtered_df[
-            ~filtered_df["status_extract_path"].str.contains(
-                "private_corpus", case=False, na=False
-            )
-        ]
-        print(
-            f"Removed {original_count - len(filtered_df)} entries referencing 'private_corpus'."
-        )
+    # Step 6: Generate README.md
+    print("\n--- Generating README.md ---")
+    language_count = metadata_df["languageCode"].nunique() if "languageCode" in metadata_df.columns else "?"
+    licence_table = _make_licence_table(metadata_df)
 
-        # 4. Drop entries with missing or invalid paths (optional but good practice)
-        filtered_df = filtered_df.dropna(subset=["status_extract_path"])
-        filtered_df = filtered_df[filtered_df["status_extract_path"] != ""]
-
-        # 5. Check extraction completion status
-        extraction_warnings = []
-        pre_extraction_count = len(filtered_df)
-
-        # Create boolean masks for extraction status
-        has_extract_date = filtered_df["status_extract_date"].notna() & (
-            filtered_df["status_extract_date"] != ""
-        )
-        has_extract_hash = filtered_df["status_extract_hash"].notna() & (
-            filtered_df["status_extract_hash"] != ""
-        )
-
-        # Case 1: Both fields empty - skip silently (not extracted)
-        both_empty = ~has_extract_date & ~has_extract_hash
-
-        # Case 2: Only one field populated - add to warnings list
-        only_date = has_extract_date & ~has_extract_hash
-        only_hash = ~has_extract_date & has_extract_hash
-
-        # Case 3: Both fields populated - proceed with processing
-        both_populated = has_extract_date & has_extract_hash
-
-        # Collect warnings for incomplete extraction status
-        for idx, row in filtered_df[only_date].iterrows():
-            extraction_warnings.append(
-                f"For translation {row['translationId']} the ebible_status file contains a status_extract_date without a status_extract_hash"
-            )
-
-        for idx, row in filtered_df[only_hash].iterrows():
-            extraction_warnings.append(
-                f"For translation {row['translationId']} the ebible_status file contains a status_extract_hash without a status_extract_date"
-            )
-
-        # Filter to only include translations with complete extraction status
-        filtered_df = filtered_df[both_populated].copy()
-
-        print(
-            f"After extraction status validation: {len(filtered_df)} translations ready for processing."
-        )
-        print(f"Silently skipped {sum(both_empty)} translations (not extracted).")
-        print(
-            f"Found {len(extraction_warnings)} translations with incomplete extraction status."
-        )
-
-        # Display specific warning messages for incomplete extraction status
-        if extraction_warnings:
-            print("\n--- Extraction Status Warnings ---")
-            for warning in extraction_warnings:
-                print(f"Warning: {warning}", file=sys.stderr)
-
-    except FileNotFoundError:
-        print(f"Error: Metadata file not found at {metadata_path}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error reading or filtering {metadata_path}: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # 5. Process translation files
-    print("\n--- Processing Translation Files ---")
-    skipped_translations = []  # List to store info about skipped files
-    translation_data = {}  # Dictionary to hold {translation_id: [line1, line2,...]}
-
-    for index, row in tqdm(
-        filtered_df.iterrows(), total=len(filtered_df), desc="Translations"
-    ):
-        translation_id = row["translationId"]
-        text_file_path_str = row["status_extract_path"]
-
-        # Handle potential relative paths in metadata - assume relative to EBIBLE_DATA_DIR if not absolute
-        text_file_path = Path(text_file_path_str)
-        if not text_file_path.is_absolute():
-            # This assumes paths like 'corpus/eng-engESV.txt' are relative to ebible_data_dir
-            # Adjust if the paths in the CSV are relative to a different base
-            text_file_path = ebible_data_dir / text_file_path
-
-        if not text_file_path.exists():
-            # This should not happen since we filtered for complete extraction status earlier
-            # If we reach here, it means both status_extract_date and status_extract_hash are populated
-            # but the file is missing - this indicates a data integrity issue
-            print(
-                f"Error: Expected extracted file not found for {translation_id} (extraction status indicates complete): {text_file_path}",
-                file=sys.stderr,
-            )
-            skipped_translations.append(
-                {
-                    "id": translation_id,
-                    "path": str(text_file_path),
-                    "reason": "Expected file missing (extraction marked complete but file not found)",
-                }
-            )
-            continue
-
-        try:
-            with open(text_file_path, "r", encoding="utf-8") as f_text:
-                # Read all lines, preserving empty lines and stripping only trailing newline/whitespace
-                text_lines = [line.rstrip("\r\n") for line in f_text]
-
-            # --- Line Count Check ---
-            if len(text_lines) != vref_length:
-                print(
-                    f"Warning: Line count mismatch for {translation_id} ({len(text_lines)} lines) vs vref.txt ({vref_length} lines). Skipping.",
-                    file=sys.stderr,
-                )
-                skipped_translations.append(
-                    {
-                        "id": translation_id,
-                        "path": str(text_file_path),
-                        "reason": f"Line count mismatch ({len(text_lines)} vs {vref_length})",
-                    }
-                )
-                continue
-
-            # Store data for later concatenation
-            # Ensure the column name is valid (pandas might handle some cases, but good to be safe)
-            # For Hugging Face, simple IDs are usually fine.
-            if translation_id in translation_data:
-                # This check might be redundant if translationId is unique in metadata, but safe to keep
-                print(
-                    f"Warning: Duplicate translationId '{translation_id}' encountered during processing. Overwriting previous data for this ID.",
-                    file=sys.stderr,
-                )
-                # Or potentially add a suffix, e.g., f"{translation_id}_{index}"
-            translation_data[translation_id] = text_lines
-
-        except Exception as e:
-            print(
-                f"Error processing file {text_file_path.name} for {translation_id}: {e}",
-                file=sys.stderr,
-            )
-            skipped_translations.append(
-                {
-                    "id": translation_id,
-                    "path": str(text_file_path),
-                    "reason": f"Processing error: {e}",
-                }
-            )
-            # Decide whether to continue or exit on error
-            # continue
-
-    # 6. Combine base DataFrame with translation data
-    print("\n--- Combining DataFrames ---")
-    if translation_data:
-        included_translation_ids = list(translation_data.keys())
-        translations_df = pd.DataFrame(translation_data)
-        df = pd.concat([df, translations_df], axis=1)
-        print(f"Added {len(translations_df.columns)} translation columns.")
+    if template_path.exists():
+        template = template_path.read_text(encoding="utf-8")
     else:
-        included_translation_ids = []
-        print("No translation data was collected.")
-    # 7. Save Main Parquet Output
-    print("\n--- Saving Parquet File ---")
-    if len(df.columns) <= 3:  # Only book, chapter, verse columns exist
-        print(
-            "Error: No translation data was successfully processed and added.",
-            file=sys.stderr,
-        )
-        print("Please check warnings and input files.", file=sys.stderr)
-    else:
-        try:
-            print(
-                f"Writing {len(df)} rows and {len(df.columns)} columns to {hf_main_parquet_file}..."
-            )
-            df.to_parquet(
-                hf_main_parquet_file,
-                index=False,
-                engine="pyarrow",
-                compression="snappy",
-            )
-            print("Successfully wrote Parquet file.")
-        except Exception as e:
-            print(
-                f"Error writing Parquet file to {hf_main_parquet_file}: {e}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        print(f"Warning: README template not found at {template_path}. Writing minimal README.",
+              file=sys.stderr)
+        template = "# eBible Parallel Corpus\n\nGenerated: {{GENERATED_DATE}}\n"
 
-    # 8. Prepare and Save Metadata File for Included Translations
-    print("\n--- Preparing and Saving Metadata File ---")
-    if included_translation_ids:
-        # Filter the original metadata_df to include only rows for translations present in the parquet file
-        final_metadata_df = metadata_df[
-            metadata_df["translationId"].isin(included_translation_ids)
-        ].copy()
+    today = date.today()
+    readme_content = render_readme(template, {
+        "TRANSLATION_COUNT": len(valid_ids),
+        "LANGUAGE_COUNT": language_count,
+        "VERSE_COUNT": len(vref_list),
+        "GENERATED_DATE": today.isoformat(),
+        "GENERATED_YEAR": today.year,
+        "LICENCE_TABLE": licence_table,
+    })
+    readme_path.write_text(readme_content, encoding="utf-8")
+    print(f"  Written: {readme_path}")
 
-        # Select relevant columns for the public metadata file (adjust this list as needed)
-        relevant_metadata_columns = [
-            "languageCode",
-            "translationId",
-            "languageName",
-            "languageNameInEnglish",
-            "dialect",
-            "homeDomain",
-            "title",
-            "description",
-            "Redistributable",
-            "Copyright",
-            "UpdateDate",
-            "publicationURL",
-            "OTbooks",
-            "OTchapters",
-            "OTverses",
-            "NTbooks",
-            "NTchapters",
-            "NTverses",
-            "DCbooks",
-            "DCchapters",
-            "DCverses",
-            "FCBHID",
-            "Certified",
-            "inScript",
-            "swordName",
-            "rodCode",
-            "textDirection",
-            "downloadable",
-            "font",
-            "shortTitle",
-            "PODISBN",
-            "script",
-            "sourceDate",
-            "licence_ID",
-            "licence_File",
-            "licence_Language",
-            "licence_Dialect",
-            "licence_Vernacular_Title",
-            "licence_Licence_Type",
-            "licence_Licence_Version",
-            "licence_CC_Licence_Link",
-            "licence_Copyright_Holder",
-            "licence_Copyright_Years",
-            "licence_Translation_by",
-            "status_versification",
-            "status_inferred_versification",  # Added the new column
-        ]
-        # Ensure only existing columns are selected
-        relevant_metadata_columns = [
-            col for col in relevant_metadata_columns if col in final_metadata_df.columns
-        ]
-        final_metadata_df = final_metadata_df[relevant_metadata_columns]
-
-        try:
-            print(
-                f"Writing metadata for {len(final_metadata_df)} included translations to {hf_main_parquet_file}..."
-            )
-            final_metadata_df.to_csv(
-                hf_main_parquet_file, index=False, encoding="utf-8"
-            )
-            print("Successfully wrote metadata CSV file.")
-        except Exception as e:
-            print(
-                f"Error writing metadata CSV file to {hf_main_parquet_file}: {e}",
-                file=sys.stderr,
-            )
-            # Don't exit, the main parquet might still be useful
-    else:
-        print("Skipping metadata file generation as no translations were included.")
-
-    # 9. Final Report
-    print("\n--- Processing Summary ---")
-    print(f"Total translations in metadata: {len(metadata_df)}")
-    print(
-        f"Considered for processing (Redistributable, not private): {len(filtered_df)}"
-    )
-    processed_count = len(df.columns) - 3  # Subtract book, chapter, verse columns
-    print(f"Successfully processed and included: {processed_count}")
-    print(f"Skipped translations: {len(skipped_translations)}")
-
-    if skipped_translations:
-        print("\nSkipped Translations Report:")
-        for item in skipped_translations:
-            print(
-                f"  - ID: {item['id']}, Reason: {item['reason']}, Path: {item['path']}"
-            )
-
-    print("\nPreprocessing finished.")
+    # Step 7: Summary
+    print("\n--- Summary ---")
+    print(f"  Translations in metadata:      {total_in_metadata}")
+    print(f"  Candidates (redistributable):  {len(candidates)}")
+    print(f"  Pre-flight failures (skipped): {len(skipped_ids)}")
+    print(f"  Included in main.parquet:      {len(valid_ids)}")
+    print(f"  Languages represented:         {language_count}")
+    print(f"  Output:                        {hf_output_dir}")
 
 
 if __name__ == "__main__":

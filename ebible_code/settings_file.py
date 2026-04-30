@@ -1,3 +1,4 @@
+import os
 import sys
 import codecs
 import textwrap
@@ -33,6 +34,8 @@ POST_PART = r"[a-z].+"
 LOADED_VRS_OBJECTS: Dict[str, Versification] = {}
 VRS_NAME_TO_NUM_STRING: Dict[str, str] = {}
 VALID_VRS_NUM_STRINGS: List[str] = []
+STANDARD_VERSE_DATA: Dict[VersificationType, Dict[Tuple[str, int], int]] = {}
+INVARIANT_CHAPTERS: Set[Tuple[str, int]] = set()
 
 # --- Constants for VRS file generation (from generate_project_vrs.py) ---
 # --- Constants for VRS file generation (from generate_project_vrs.py) ---
@@ -71,24 +74,24 @@ def _parse_verse_string_for_vrs(verse_str: str) -> tuple[int, str]:
 def populate_standard_versifications() -> None:
     """
     Loads standard versification files using machine.scripture.VersificationType
-    and populates LOADED_VRS_OBJECTS, VRS_NAME_TO_NUM_STRING, and VALID_VRS_NUM_STRINGS.
+    and populates LOADED_VRS_OBJECTS, VRS_NAME_TO_NUM_STRING, VALID_VRS_NUM_STRINGS,
+    STANDARD_VERSE_DATA, and INVARIANT_CHAPTERS.
     """
-    global VALID_VRS_NUM_STRINGS # Ensure we modify the global list
-    
-    if LOADED_VRS_OBJECTS: # Avoid re-populating if already done
+    global VALID_VRS_NUM_STRINGS
+
+    if LOADED_VRS_OBJECTS:
         return
 
     for vtype in VersificationType:
         if vtype == VersificationType.UNKNOWN:
             continue
         try:
-            # Versification.get_builtin() loads standard .vrs files
-            # distributed with the 'machine' library by name.
-            vrs_obj = Versification.get_builtin(vtype) # vrs_obj.name will be "English", "RussianOrthodox", etc.
+            vrs_obj = Versification.get_builtin(vtype)
             if vrs_obj:
                 LOADED_VRS_OBJECTS[vrs_obj.name] = vrs_obj
-                VRS_NAME_TO_NUM_STRING[vrs_obj.name] = str(vtype.value) # Use enum value
-                logger.debug(f"Successfully loaded and mapped standard versification: {vrs_obj.name} -> {vtype.value}")
+                VRS_NAME_TO_NUM_STRING[vrs_obj.name] = str(vtype.value)
+                STANDARD_VERSE_DATA[vtype] = get_verse_data_from_vrs_obj(vrs_obj)
+                logger.debug(f"Loaded standard versification: {vrs_obj.name} -> {vtype.value}")
             else:
                 logger.warning(f"Could not load standard versification for type: {vtype.name} (returned None)")
         except Exception as e:
@@ -96,11 +99,19 @@ def populate_standard_versifications() -> None:
 
     if not LOADED_VRS_OBJECTS:
         logger.error("No standard versification files were loaded. Scoring will be impaired.")
-    
+
     VALID_VRS_NUM_STRINGS = sorted(list(set(VRS_NAME_TO_NUM_STRING.values())))
 
-# Call at module load time to populate standard versifications
-populate_standard_versifications()
+    # Invariant: present in ALL 6 standards AND all agree on verse count.
+    # DC-only chapters (absent from some standards) are NOT invariant.
+    num_standards = len(STANDARD_VERSE_DATA)
+    if num_standards > 0:
+        all_chapters: Set[Tuple[str, int]] = set().union(*(data.keys() for data in STANDARD_VERSE_DATA.values()))
+        for bc in all_chapters:
+            verse_counts = [STANDARD_VERSE_DATA[vt].get(bc) for vt in STANDARD_VERSE_DATA]
+            if all(v is not None for v in verse_counts) and len(set(verse_counts)) == 1:
+                INVARIANT_CHAPTERS.add(bc)
+        logger.info(f"Computed {len(INVARIANT_CHAPTERS)} invariant chapters from {num_standards} standard versifications.")
 
 
 def add_settings_file(project_folder: Path, language_code: str) -> None:
@@ -145,6 +156,95 @@ def get_verse_data_from_vrs_obj(vrs_obj: Optional[Versification]) -> Dict[Tuple[
             if max_verse > 0: # Only include chapters with actual verses
                 data[(book_id_str, chapter_num_int)] = max_verse
     return data
+
+def compute_versification_scores(
+    project_verse_data: Dict[Tuple[str, int], int]
+) -> dict:
+    """
+    Scores a project's verse data against all standard versifications.
+
+    Returns a dict with:
+      'scores': Dict[VersificationType, float]
+      'mismatch_counts': Dict[VersificationType, int]
+      'project_differentiating_chapters': Set[Tuple[str, int]]
+      'total_project_chapters': int
+    """
+    project_differentiating_chapters: Set[Tuple[str, int]] = {
+        bc for bc in project_verse_data if bc not in INVARIANT_CHAPTERS
+    }
+    total_project_chapters = len(project_verse_data)
+    n = len(project_differentiating_chapters)
+
+    scores: Dict[VersificationType, float] = {}
+    mismatch_counts: Dict[VersificationType, int] = {}
+
+    for vt, std_data in STANDARD_VERSE_DATA.items():
+        if n == 0:
+            scores[vt] = 0.0
+            mismatch_counts[vt] = 0
+        else:
+            matching = sum(
+                1 for bc in project_differentiating_chapters
+                if project_verse_data[bc] == std_data.get(bc)
+            )
+            scores[vt] = matching / n
+            mismatch_counts[vt] = n - matching
+
+    return {
+        'scores': scores,
+        'mismatch_counts': mismatch_counts,
+        'project_differentiating_chapters': project_differentiating_chapters,
+        'total_project_chapters': total_project_chapters,
+    }
+
+
+def estimate_versification(project_path: Path) -> VersificationType:
+    """Estimates the versification type for a project by scoring its .vrs file against all standards."""
+    project_name = project_path.name
+    project_vrs_path = project_path / f"{project_name}.vrs"
+
+    if not project_vrs_path.is_file():
+        logger.warning(f"VRS file not found: {project_vrs_path}. Defaulting to ENGLISH.")
+        return VersificationType.ENGLISH
+
+    try:
+        project_vrs_obj = Versification.load(project_vrs_path, fallback_name=project_name)
+    except Exception as e:
+        logger.warning(f"Could not load VRS file {project_vrs_path}: {e}. Defaulting to ENGLISH.")
+        return VersificationType.ENGLISH
+
+    if not project_vrs_obj:
+        return VersificationType.ENGLISH
+
+    project_verse_data = get_verse_data_from_vrs_obj(project_vrs_obj)
+    if not project_verse_data:
+        logger.warning(f"No verse data in {project_vrs_path}. Defaulting to ENGLISH.")
+        return VersificationType.ENGLISH
+
+    result = compute_versification_scores(project_verse_data)
+    project_differentiating_chapters = result['project_differentiating_chapters']
+    scores: Dict[VersificationType, float] = result['scores']
+
+    if not project_differentiating_chapters:
+        logger.info(f"{project_name}: No differentiating chapters. Indistinguishable; defaulting to ENGLISH.")
+        return VersificationType.ENGLISH
+
+    try:
+        threshold = float(os.environ.get('VERSIFICATION_UNKNOWN_THRESHOLD', '0.0'))
+    except ValueError:
+        threshold = 0.0
+
+    best_score = max(scores.values()) if scores else 0.0
+
+    if best_score < threshold:
+        logger.info(f"{project_name}: Best score {best_score:.4f} < threshold {threshold:.4f}. Returning UNKNOWN.")
+        return VersificationType.UNKNOWN
+
+    best_types = [vt for vt, s in scores.items() if s == best_score]
+    if VersificationType.ENGLISH in best_types:
+        return VersificationType.ENGLISH
+    return best_types[0]
+
 
 def calculate_similarity_score_for_settings(
     project_v_data: Dict[Tuple[str, int], int],
@@ -440,3 +540,7 @@ def generate_vrs_from_project(project_path: Path) -> Optional[Path]:
     except IOError as e:
         logger.error(f"Could not write VRS file {vrs_filepath}: {e}")
         return None
+
+
+# Populate standard versifications at module load time (after all functions are defined).
+populate_standard_versifications()

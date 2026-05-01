@@ -274,6 +274,10 @@ Parametrized, skipped if project folder absent:
 
 **How**: extend existing parametrized test in `test_settings_file.py`.
 
+> **Note**: Tests force `VERSIFICATION_UNKNOWN_THRESHOLD=0.0` via `monkeypatch` to assert raw scoring algorithm output. With the calibrated production threshold of `0.8`, low-confidence projects like `eng-uk-lxx2012` (score ≈ 0.596) return `UNKNOWN` instead of `SEPTUAGINT`.
+
+> **Note**: The `status_inferred_versification` column in the status CSV is stored as `float64` by pandas when the column contains `NaN` for unprocessed rows. This is expected behaviour. Integer comparisons still work correctly (`4.0 == 4`, `0.0 == 0`); the spec's use of "integer" refers to the conceptual value, not the pandas dtype.
+
 ### V4 — `write_settings_file()` unit tests
 
 - Call with each `VersificationType` value 1–6; parse resulting XML; assert `<Versification>` tag contains the correct integer.

@@ -83,7 +83,8 @@ Run `poetry run pytest` after every meaningful commit.
 
 ## Phase 6: Final validation
 
-- [ ] 6.1 Run `poetry run pytest` — all tests pass
-- [ ] 6.2 Run `poetry run python ebible_code/ebible.py --test` — no regressions
-- [ ] 6.3 Run `poetry run python ebible_code/ebible.py --update-settings` on a subset — confirm correct versifications in Settings.xml and status CSV
-- [ ] 6.4 Call sub-agent review: "Review spec.md and the current implementation for gaps" — loop on feedback until alignment reached
+- [x] 6.1 Run `poetry run pytest` — all tests pass (67 passed, 3 skipped)
+- [x] 6.2 Run `poetry run python ebible_code/ebible.py --test` — no regressions
+- [x] 6.3 Run `poetry run python ebible_code/ebible.py --update-settings` on a subset — confirmed correct versifications in Settings.xml and status CSV
+      - Note: `--filter` does not gate `update_all_settings()`; the function iterates all rows in the status CSV regardless of filter flag
+- [x] 6.4 Advisor review complete — no blockers; spec.md updated with spurious-chapter filter docs, V3 threshold note, and float64 note

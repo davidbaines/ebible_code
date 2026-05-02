@@ -99,6 +99,6 @@ If you use this dataset in your work, please cite David Baines, SIL, PABNLP:
   title  = {eBible Parallel Corpus},
   author = {David Baines SIL Global PABNLP},
   url    = {https://pabnlp.org/},
-  year   = {2026}
+  year   = {{GENERATED_DATE}}
 }
 ```

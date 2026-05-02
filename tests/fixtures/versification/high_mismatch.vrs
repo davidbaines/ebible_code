@@ -1,0 +1,9 @@
+# Synthetic fixture: differentiating chapters with verse counts matching NO standard versification.
+# 1SA 23: all standards have 28-29, project uses 99
+# 1SA 24: all standards have 22-23, project uses 99
+# 2CO 13: all standards have 13-14, project uses 99
+# ACT 19: all standards have 40-41, project uses 99
+# With VERSIFICATION_UNKNOWN_THRESHOLD=0.3, estimate_versification() should return UNKNOWN.
+1SA 23:99 24:99
+2CO 13:99
+ACT 19:99

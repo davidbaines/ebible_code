@@ -1,0 +1,6 @@
+# Synthetic fixture: differentiating chapters with verse counts that uniquely match RUSSIAN_ORTHODOX.
+# 3MA 1: RUSSIAN_ORTHODOX=25, all others=29 (RUSSIAN_PROTESTANT absent)
+# 3MA 2: RUSSIAN_ORTHODOX=24, all others=33 (RUSSIAN_PROTESTANT absent)
+# 3MA 3: RUSSIAN_ORTHODOX=22, all others=30 (RUSSIAN_PROTESTANT absent)
+# estimate_versification() should return RUSSIAN_ORTHODOX.
+3MA 1:25 2:24 3:22

@@ -4,7 +4,8 @@ import pytest
 from dotenv import load_dotenv
 from pathlib import Path
 
-from ebible_code.settings_file import get_versification_with_scoring
+from machine.scripture import VersificationType
+from ebible_code.settings_file import estimate_versification
 from ebible_code.rename_usfm import get_destination_file_from_book
 
 load_dotenv()
@@ -13,27 +14,32 @@ _ebible_data_dir_env = os.getenv("EBIBLE_DATA_DIR")
 EBIBLE_DATA_PROJECTS = Path(_ebible_data_dir_env).resolve() / "projects" if _ebible_data_dir_env else None
 
 
-# --- Test get_versification_with_scoring ---
+# --- Test estimate_versification ---
 
 versification_test_cases = [
-    ("eng-web-c",                        "English"),
-    ("eng-vul",                          "Vulgate"),
-    ("rus-synod-usfm-from-textus-rec",   "Russian Orthodox"),
-    ("rus-vrt",                          "Russian Protestant"),
-    ("abt-maprik",                       "English"),
-    ("eng-uk-lxx2012",                   "Septuagint"),
+    ("eng-web-c",                        VersificationType.ENGLISH),
+    ("eng-vul",                          VersificationType.VULGATE),
+    ("rus-synod-usfm-from-textus-rec",   VersificationType.RUSSIAN_ORTHODOX),
+    ("rus-vrt",                          VersificationType.RUSSIAN_PROTESTANT),
+    ("abt-maprik",                       VersificationType.ENGLISH),
+    ("eng-uk-lxx2012",                   VersificationType.SEPTUAGINT),
 ]
 
 @pytest.mark.parametrize("project_folder_name, expected_versification", versification_test_cases)
-def test_get_versification(project_folder_name, expected_versification):
-    """Tests get_versification_with_scoring against projects with known versifications."""
+def test_estimate_versification(project_folder_name, expected_versification, monkeypatch):
+    """Tests estimate_versification against projects with known versifications.
+
+    Threshold is forced to 0.0 so the test checks the scoring algorithm independent
+    of whatever VERSIFICATION_UNKNOWN_THRESHOLD is set in .env.
+    """
+    monkeypatch.setenv("VERSIFICATION_MATCH_THRESHOLD", "0.0")
     if EBIBLE_DATA_PROJECTS is None:
         pytest.skip("EBIBLE_DATA_DIR not set in .env")
     project_path = EBIBLE_DATA_PROJECTS / project_folder_name
     if not project_path.is_dir():
         pytest.skip(f"Test project directory not found: {project_path}")
 
-    actual = get_versification_with_scoring(project_path)
+    actual = estimate_versification(project_path)
     assert actual == expected_versification, (
         f"For '{project_folder_name}': expected '{expected_versification}', got '{actual}'"
     )

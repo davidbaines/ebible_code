@@ -88,3 +88,47 @@ Run `poetry run pytest` after every meaningful commit.
 - [x] 6.3 Run `poetry run python ebible_code/ebible.py --update-settings` on a subset — confirmed correct versifications in Settings.xml and status CSV
       - Note: `--filter` does not gate `update_all_settings()`; the function iterates all rows in the status CSV regardless of filter flag
 - [x] 6.4 Advisor review complete — no blockers; spec.md updated with spurious-chapter filter docs, V3 threshold note, and float64 note
+
+## Phase 7: Improved scoring system
+
+- [x] 7.1 Rewrite `compute_versification_scores()` in `settings_file.py`:
+      — Compare all non-spurious project chapters against each standard (not differentiating-only)
+      — `mismatch_counts[VT]` = count of ALL chapters where project verse count ≠ standard
+      — `scores[VT]` = `((total − mismatches) / total ) * 100` (0.0–100.0) The percentage reported to one decimal place.
+      — Keep `project_differentiating_chapters` and `total_project_chapters` in return dict
+- [x] 7.2 Update `estimate_versification()` tie-break: implement full preference order
+      ENGLISH > ORIGINAL > RUSSIAN_PROTESTANT > RUSSIAN_ORTHODOX > SEPTUAGINT > VULGATE
+- [x] 7.3 Rename env var `VERSIFICATION_UNKNOWN_THRESHOLD` → `VERSIFICATION_MATCH_THRESHOLD`
+      in `settings_file.py`, `analyse_versification.py`, `.env`, and all tests
+- [x] 7.4 Update `VersificationMatchReport` dataclass:
+      — Replace `best_score: float` with `matching_chapters: int`
+      — `status` values: `"matched"` | `"tied"` | `"unknown"` (remove `"indistinguishable"`)
+- [x] 7.5 Update `describe_versification_match()`:
+      — New notes generation per spec §Phase 7 notes rules
+      — `status = "tied"` for 0-differentiating-chapter case (was `"indistinguishable"`)
+      — `matching_chapters = total_project_chapters − mismatch_counts[winning_vt]`
+- [x] 7.6 Update `analyse_versification.csv` output in `main()`:
+      — New column order (see spec §Phase 7 Changes to analyse_versification.csv)
+      — `score_*` written as 1-decimal percentage: `round(score * 100, 1)` where `score` is the                                                                                             
+        0.0–1.0 float from `compute_versification_scores()`; e.g. 0.987 → 98.7 
+      — `mismatch_*` values are all-chapter counts
+      — `matching_chapters` column replaces `best_score`
+- [x] 7.7 Update histogram: use `VERSIFICATION_MATCH_THRESHOLD` env var; x-axis label updated
+- [x] 7.8 Write V7a unit test for `compute_versification_scores()` with synthetic verse data
+- [x] 7.9 Write V7b tie-break test: VULGATE vs RUSSIAN_PROTESTANT tie → RUSSIAN_PROTESTANT wins
+- [x] 7.10 Update V2 synthetic fixture tests (test_versification_unit.py):
+      — `nt_only_invariant.vrs`: expected status → `"tied"` (was `"indistinguishable"`)
+      — `high_mismatch.vrs`: determine actual best-scoring versification with threshold=0.0,
+        update expected return; add threshold-above-best-score case asserting status=`"unknown"`
+- [x] 7.11 Update V3 real-data tests (test_settings_file.py):
+      — Change `monkeypatch.setenv` key to `VERSIFICATION_MATCH_THRESHOLD`
+      — Confirm all six expected VersificationType values still correct under new scoring
+- [x] 7.12 Update V6 CSV test: assert new column headers, 1-decimal score_* values, valid status values
+- [x] 7.13 Run `poetry run pytest` — all tests pass
+
+## Phase 8: Threshold calibration (requires user input)
+
+- [ ] 8.1 Run `poetry run python ebible_code/analyse_versification.py` against full data with new scoring
+- [ ] 8.2 Review new histogram and score distribution; identify natural breakpoint
+- [ ] 8.3 Set `VERSIFICATION_MATCH_THRESHOLD` in `.env` to chosen value
+- [ ] 8.4 Re-run tests with threshold set; confirm UNKNOWN cases correctly identified

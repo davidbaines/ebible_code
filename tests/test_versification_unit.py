@@ -85,11 +85,13 @@ synthetic_cases = [
     ("english_pattern.vrs",          VersificationType.ENGLISH),
     ("vulgate_pattern.vrs",          VersificationType.VULGATE),
     ("russian_orthodox_pattern.vrs", VersificationType.RUSSIAN_ORTHODOX),
+    # high_mismatch: all 4 chapters score 0% against every standard; tied → ENGLISH by preference
+    ("high_mismatch.vrs",            VersificationType.ENGLISH),
 ]
 
 @pytest.mark.parametrize("fixture_name, expected", synthetic_cases)
 def test_estimate_versification_fixture(fixture_name, expected, project_from_fixture, monkeypatch):
-    monkeypatch.setenv("VERSIFICATION_UNKNOWN_THRESHOLD", "0.0")
+    monkeypatch.setenv("VERSIFICATION_MATCH_THRESHOLD", "0.0")
     proj_dir = project_from_fixture(fixture_name)
     actual = estimate_versification(proj_dir)
     assert actual == expected, (
@@ -97,12 +99,13 @@ def test_estimate_versification_fixture(fixture_name, expected, project_from_fix
     )
 
 
-def test_estimate_versification_high_mismatch_returns_unknown(project_from_fixture, monkeypatch):
-    monkeypatch.setenv("VERSIFICATION_UNKNOWN_THRESHOLD", "0.3")
+def test_estimate_versification_high_mismatch_below_threshold_returns_english(project_from_fixture, monkeypatch):
+    # All scores are 0.0%; any threshold > 0 triggers the UNKNOWN fallback → ENGLISH
+    monkeypatch.setenv("VERSIFICATION_MATCH_THRESHOLD", "1.0")
     proj_dir = project_from_fixture("high_mismatch.vrs")
     actual = estimate_versification(proj_dir)
-    assert actual == VersificationType.UNKNOWN, (
-        f"Expected UNKNOWN for high_mismatch fixture at threshold=0.3, got {actual.name}"
+    assert actual == VersificationType.ENGLISH, (
+        f"Expected ENGLISH (unknown fallback) for high_mismatch at threshold=1.0, got {actual.name}"
     )
 
 
@@ -122,17 +125,19 @@ def test_estimate_versification_nonexistent_folder(tmp_path):
 
 
 status_cases = [
-    ("nt_only_invariant.vrs",        "0.0", "indistinguishable"),
-    ("english_pattern.vrs",          "0.0", "matched"),
-    ("vulgate_pattern.vrs",          "0.0", "matched"),
-    ("russian_orthodox_pattern.vrs", "0.0", "matched"),
-    ("high_mismatch.vrs",            "0.3", "unknown"),
+    # nt_only_invariant: all NT chapters invariant → all versifications tie at 100% → "tied"
+    ("nt_only_invariant.vrs",        "0.0",  "tied"),
+    ("english_pattern.vrs",          "0.0",  "matched"),
+    ("vulgate_pattern.vrs",          "0.0",  "matched"),
+    ("russian_orthodox_pattern.vrs", "0.0",  "matched"),
+    # high_mismatch: all scores 0.0%; threshold=1.0 triggers "unknown"
+    ("high_mismatch.vrs",            "1.0",  "unknown"),
 ]
 
 @pytest.mark.parametrize("fixture_name, threshold, expected_status", status_cases)
 def test_describe_versification_match_status(fixture_name, threshold, expected_status,
                                               project_from_fixture, monkeypatch):
-    monkeypatch.setenv("VERSIFICATION_UNKNOWN_THRESHOLD", threshold)
+    monkeypatch.setenv("VERSIFICATION_MATCH_THRESHOLD", threshold)
     proj_dir = project_from_fixture(fixture_name)
     report = describe_versification_match(proj_dir)
     assert report.status == expected_status, (

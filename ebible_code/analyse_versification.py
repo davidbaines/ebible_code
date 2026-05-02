@@ -31,6 +31,7 @@ if str(_this_dir) not in sys.path:
     sys.path.insert(0, str(_this_dir))
 
 from settings_file import (
+    _VT_PREFERENCE_ORDER,
     compute_versification_scores,
     get_verse_data_from_vrs_obj,
 )
@@ -40,18 +41,18 @@ from settings_file import (
 class VersificationMatchReport:
     project_name: str
     best_match: VersificationType
-    best_score: float
-    scores: dict            # Dict[VersificationType, float]
-    mismatch_counts: dict   # Dict[VersificationType, int]
+    matching_chapters: int          # total_project_chapters − mismatch_counts[best_match]
+    scores: dict                    # Dict[VersificationType, float]  percentage 0.0–100.0
+    mismatch_counts: dict           # Dict[VersificationType, int]  all-chapter mismatches
     total_differentiating_chapters: int
     total_project_chapters: int
-    status: str             # "matched" | "indistinguishable" | "unknown"
+    status: str                     # "matched" | "tied" | "unknown"
     notes: str
 
 
 def _threshold() -> float:
     try:
-        return float(os.environ.get("VERSIFICATION_UNKNOWN_THRESHOLD", "0.0"))
+        return float(os.environ.get("VERSIFICATION_MATCH_THRESHOLD", "0.0"))
     except ValueError:
         return 0.0
 
@@ -68,12 +69,12 @@ def describe_versification_match(project_path: Path) -> VersificationMatchReport
         return VersificationMatchReport(
             project_name=project_name,
             best_match=VersificationType.ENGLISH,
-            best_score=0.0,
+            matching_chapters=0,
             scores=_empty_scores,
             mismatch_counts=_empty_mismatches,
             total_differentiating_chapters=0,
             total_project_chapters=0,
-            status="indistinguishable",
+            status="tied",
             notes="No .vrs file found. Defaulting to English.",
         )
 
@@ -83,12 +84,12 @@ def describe_versification_match(project_path: Path) -> VersificationMatchReport
         return VersificationMatchReport(
             project_name=project_name,
             best_match=VersificationType.ENGLISH,
-            best_score=0.0,
+            matching_chapters=0,
             scores=_empty_scores,
             mismatch_counts=_empty_mismatches,
             total_differentiating_chapters=0,
             total_project_chapters=0,
-            status="indistinguishable",
+            status="tied",
             notes=f"Could not load .vrs file: {exc}. Defaulting to English.",
         )
 
@@ -102,29 +103,17 @@ def describe_versification_match(project_path: Path) -> VersificationMatchReport
     total_differentiating_chapters = len(diff_chapters)
     threshold = _threshold()
 
-    if total_differentiating_chapters == 0:
-        return VersificationMatchReport(
-            project_name=project_name,
-            best_match=VersificationType.ENGLISH,
-            best_score=0.0,
-            scores=scores,
-            mismatch_counts=mismatch_counts,
-            total_differentiating_chapters=0,
-            total_project_chapters=total_project_chapters,
-            status="indistinguishable",
-            notes=(
-                f"All {total_project_chapters} project chapters are invariant across versifications. "
-                "Cannot distinguish; defaulting to English. "
-                "'Indistinguishable' means the Bible only contains chapters and verses whose "
-                "verse counts are identical in all versification systems."
-            ),
-        )
-
     best_score = max(scores.values()) if scores else 0.0
-    best_types = [vt for vt, s in scores.items() if s == best_score]
-    best_match = (
-        VersificationType.ENGLISH if VersificationType.ENGLISH in best_types else best_types[0]
-    )
+    best_types = {vt for vt, s in scores.items() if s == best_score}
+
+    # Apply preference order to break ties.
+    best_match = VersificationType.ENGLISH
+    for vt in _VT_PREFERENCE_ORDER:
+        if vt in best_types:
+            best_match = vt
+            break
+
+    matching_chapters = total_project_chapters - mismatch_counts.get(best_match, 0)
 
     if best_score < threshold:
         per_std = ", ".join(
@@ -133,31 +122,57 @@ def describe_versification_match(project_path: Path) -> VersificationMatchReport
         )
         return VersificationMatchReport(
             project_name=project_name,
-            best_match=VersificationType.UNKNOWN,
-            best_score=best_score,
+            best_match=VersificationType.ENGLISH,
+            matching_chapters=total_project_chapters - mismatch_counts.get(VersificationType.ENGLISH, 0),
             scores=scores,
             mismatch_counts=mismatch_counts,
             total_differentiating_chapters=total_differentiating_chapters,
             total_project_chapters=total_project_chapters,
             status="unknown",
             notes=(
-                f"Best score {best_score:.1%} is below threshold {threshold:.1%}. "
-                "No versification matched well. "
+                f"Best score {best_score:.1f}% is below threshold {threshold:.1f}%. "
+                "No versification matched well enough. "
                 "Settings.xml will use English (4) as a fallback. "
                 f"Mismatch counts per standard: {per_std}"
             ),
         )
 
+    is_tied = len(best_types) > 1
+
+    if not is_tied:
+        return VersificationMatchReport(
+            project_name=project_name,
+            best_match=best_match,
+            matching_chapters=matching_chapters,
+            scores=scores,
+            mismatch_counts=mismatch_counts,
+            total_differentiating_chapters=total_differentiating_chapters,
+            total_project_chapters=total_project_chapters,
+            status="matched",
+            notes=f"Best match: {best_match.name} ({best_score:.1f}% of project chapters match)",
+        )
+
+    # Tied case.
+    tied_names = ", ".join(vt.name for vt in _VT_PREFERENCE_ORDER if vt in best_types)
+    if total_differentiating_chapters == 0:
+        notes = (
+            f"All {total_project_chapters} project chapters are invariant; "
+            f"all versifications match equally ({best_score:.1f}%). "
+            "ENGLISH chosen by preference."
+        )
+    else:
+        notes = f"Tied at {best_score:.1f}%: {tied_names}. {best_match.name} chosen as most common."
+
     return VersificationMatchReport(
         project_name=project_name,
         best_match=best_match,
-        best_score=best_score,
+        matching_chapters=matching_chapters,
         scores=scores,
         mismatch_counts=mismatch_counts,
         total_differentiating_chapters=total_differentiating_chapters,
         total_project_chapters=total_project_chapters,
-        status="matched",
-        notes=f"Best match: {best_match.name} ({best_score:.1%} of differentiating chapters match)",
+        status="tied",
+        notes=notes,
     )
 
 
@@ -207,10 +222,10 @@ def main() -> None:
     std_types = [vt for vt in VersificationType if vt != VersificationType.UNKNOWN]
     csv_path = metadata_dir / "analyse_versification.csv"
     fieldnames = (
-        ["project_name", "status", "best_match", "best_score",
-         "total_differentiating_chapters", "total_project_chapters"]
+        ["project_name", "best_match", "status", "matching_chapters",
+         "total_project_chapters", "total_differentiating_chapters"]
+        + [f"mismatch_{vt.name}" for vt in std_types]
         + [f"score_{vt.name}" for vt in std_types]
-        + [f"mismatches_{vt.name}" for vt in std_types]
         + ["notes"]
     )
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -219,27 +234,28 @@ def main() -> None:
         for r in reports:
             row: dict = {
                 "project_name": r.project_name,
-                "status": r.status,
                 "best_match": r.best_match.name,
-                "best_score": r.best_score,
-                "total_differentiating_chapters": r.total_differentiating_chapters,
+                "status": r.status,
+                "matching_chapters": r.matching_chapters,
                 "total_project_chapters": r.total_project_chapters,
+                "total_differentiating_chapters": r.total_differentiating_chapters,
                 "notes": r.notes,
             }
             for vt in std_types:
-                row[f"score_{vt.name}"] = r.scores.get(vt, 0.0)
-                row[f"mismatches_{vt.name}"] = r.mismatch_counts.get(vt, 0)
+                row[f"mismatch_{vt.name}"] = r.mismatch_counts.get(vt, 0)
+                row[f"score_{vt.name}"] = round(r.scores.get(vt, 0.0), 1)
             writer.writerow(row)
 
     # ---- Histogram ----
-    best_scores = [r.best_score for r in reports]
+    # best score for each project = score of the winning versification (percentage 0–100)
+    best_scores = [max(r.scores.values()) if r.scores else 0.0 for r in reports]
     png_path = metadata_dir / "versification_scores_histogram.png"
     fig, ax = plt.subplots(figsize=(10, 6))
-    bins = [i / 10 for i in range(11)]
+    bins = [i * 10 for i in range(11)]  # 0, 10, 20, ..., 100
     ax.hist(best_scores, bins=bins, edgecolor="black", color="steelblue", alpha=0.8)
     ax.axvline(threshold, color="red", linestyle="--", linewidth=1.5,
-               label=f"Threshold = {threshold:.2f}")
-    ax.set_xlabel("Best versification match score")
+               label=f"Threshold = {threshold:.1f}%")
+    ax.set_xlabel("Best versification match score (%)")
     ax.set_ylabel("Number of projects")
     ax.set_title("Versification best-match score distribution")
     ax.legend()
@@ -248,22 +264,22 @@ def main() -> None:
 
     # ---- Stdout summary ----
     total = len(reports)
-    indistinguishable = sum(1 for r in reports if r.status == "indistinguishable")
+    tied_count = sum(1 for r in reports if r.status == "tied")
     below_threshold = sum(1 for r in reports if r.status == "unknown")
 
     print("\nVersification analysis complete.")
     print(f"Total projects analysed: {total}")
-    print("\nScore distribution (best_score bands):")
+    print("\nScore distribution (best score bands, %):")
     for i in range(10):
-        lo = i / 10
-        hi = (i + 1) / 10
+        lo = i * 10
+        hi = (i + 1) * 10
         count = sum(
-            1 for r in reports
-            if lo <= r.best_score < hi or (i == 9 and r.best_score == 1.0)
+            1 for bs in best_scores
+            if lo <= bs < hi or (i == 9 and bs == 100.0)
         )
-        print(f"  {lo:.1f}–{hi:.1f}: {count}")
-    print(f"\nIndistinguishable projects (all chapters invariant): {indistinguishable}")
-    print(f"Projects currently below threshold ({threshold:.2f}): {below_threshold}")
+        print(f"  {lo:3d}–{hi:3d}: {count}")
+    print(f"\nTied projects (decided by preference order): {tied_count}")
+    print(f"Projects currently below threshold ({threshold:.1f}%): {below_threshold}")
     print(f"\nCSV:       {csv_path}")
     print(f"Histogram: {png_path}")
 

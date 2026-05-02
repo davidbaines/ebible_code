@@ -32,7 +32,7 @@ def test_estimate_versification(project_folder_name, expected_versification, mon
     Threshold is forced to 0.0 so the test checks the scoring algorithm independent
     of whatever VERSIFICATION_UNKNOWN_THRESHOLD is set in .env.
     """
-    monkeypatch.setenv("VERSIFICATION_UNKNOWN_THRESHOLD", "0.0")
+    monkeypatch.setenv("VERSIFICATION_MATCH_THRESHOLD", "0.0")
     if EBIBLE_DATA_PROJECTS is None:
         pytest.skip("EBIBLE_DATA_DIR not set in .env")
     project_path = EBIBLE_DATA_PROJECTS / project_folder_name

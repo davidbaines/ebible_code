@@ -295,3 +295,189 @@ Parametrized, skipped if project folder absent:
 - CSV file created with expected columns (`project_name`, `status`, `best_score`, one score column per versification)
 - PNG file created and non-zero bytes
 - Stdout contains at least one score band line and a total count
+
+---
+
+## Phase 7: Improved Scoring System
+
+### Motivation
+
+The current scoring uses only differentiating chapters (chapters where standards disagree) as the
+denominator. A project with 2 matching differentiating chapters scores 100% identically to one with
+300. The new system scores against all non-spurious project chapters, making `score_ENGLISH = 97.3`
+mean "97.3% of this project's chapters have the correct verse count for the ENGLISH versification" —
+interpretable without domain knowledge.
+
+The distinction between invariant and differentiating chapters is retained as a reporting column
+(`total_differentiating_chapters`) so readers can assess how much discriminating signal was
+available, but it no longer controls the denominator.
+
+---
+
+### Changes to `compute_versification_scores()`
+
+**New behaviour:** for each non-spurious project chapter `(book, chapter)` with verse count `v`,
+compare `v` against `STANDARD_VERSE_DATA[VT][(book, chapter)]` for every standard `VT`. Count
+chapters where they differ as `mismatch_counts[VT]`.
+
+Spurious chapter filter (unchanged): exclude `(book, chapter)` where
+`project_verse_data[(book, chapter)] == 1` AND `any(std.get((book, chapter), 0) > 1 for std in
+STANDARD_VERSE_DATA.values())`.
+
+**Updated return dict:**
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `scores` | `Dict[VersificationType, float]` | `(total − mismatches) / total` per standard, 0.0–1.0 |
+| `mismatch_counts` | `Dict[VersificationType, int]` | Mismatched chapters across **all** non-spurious chapters |
+| `project_differentiating_chapters` | `Set[Tuple[str, int]]` | Non-spurious non-invariant chapters (for reporting only) |
+| `total_project_chapters` | `int` | Non-spurious chapter count |
+
+---
+
+### Changes to `estimate_versification()`
+
+**Tie-break preference order** (replaces ENGLISH-only preference):
+
+| Rank | VersificationType |
+|------|------------------|
+| 1 | `ENGLISH` |
+| 2 | `ORIGINAL` |
+| 3 | `RUSSIAN_PROTESTANT` |
+| 4 | `RUSSIAN_ORTHODOX` |
+| 5 | `SEPTUAGINT` |
+| 6 | `VULGATE` |
+
+**UNKNOWN threshold**: read from env var `VERSIFICATION_MATCH_THRESHOLD` (replaces
+`VERSIFICATION_UNKNOWN_THRESHOLD`). Basis: `max(scores.values())` (fraction of all project chapters
+matching the best standard). Default `0.0` (UNKNOWN never returned until threshold is set).
+
+**Updated algorithm:**
+
+1. Locate `.vrs`; if missing or unloadable, log warning and return `VersificationType.ENGLISH`.
+2. Extract verse data via `get_verse_data_from_vrs_obj()`.
+3. Compute spurious chapters and remove them from verse data.
+4. If no chapters remain, return `VersificationType.ENGLISH`.
+5. Call `compute_versification_scores()`.
+6. If `best_score < VERSIFICATION_MATCH_THRESHOLD`: return `VersificationType.ENGLISH`.
+7. Collect all `VersificationType`s with `score == best_score`; apply preference order; return winner.
+
+---
+
+### Changes to `analyse_versification.csv`
+
+**Column order:**
+
+```
+project_name | best_match | status | matching_chapters | total_project_chapters |
+total_differentiating_chapters | mismatch_ORIGINAL | mismatch_SEPTUAGINT | mismatch_VULGATE |
+mismatch_ENGLISH | mismatch_RUSSIAN_PROTESTANT | mismatch_RUSSIAN_ORTHODOX |
+score_ORIGINAL | score_SEPTUAGINT | score_VULGATE | score_ENGLISH |
+score_RUSSIAN_PROTESTANT | score_RUSSIAN_ORTHODOX | notes
+```
+
+**Column definitions:**
+
+| Column | Type | Definition |
+|--------|------|-----------|
+| `matching_chapters` | int | `total_project_chapters − mismatch_[winning_vt]` |
+| `mismatch_*` | int | Chapters where project verse count ≠ standard verse count (all non-spurious chapters) |
+| `score_*` | float (1 d.p.) | `(total_project_chapters − mismatch_VT) / total_project_chapters × 100` |
+| `total_differentiating_chapters` | int | Non-spurious, non-invariant chapters (context only; not used in scoring) |
+
+**Status values:**
+
+| Value | Meaning |
+|-------|---------|
+| `"matched"` | One versification scored strictly higher than all others |
+| `"tied"` | Two or more versifications tied at top score; preference order determined winner |
+| `"unknown"` | Best score < `VERSIFICATION_MATCH_THRESHOLD`; `best_match` written as `ENGLISH` as fallback |
+
+Note: the former `"indistinguishable"` status (0 differentiating chapters) is subsumed into
+`"tied"` — all versifications tie at the same score (all invariant chapters match all standards
+equally), and ENGLISH wins by preference.
+
+---
+
+### Changes to `VersificationMatchReport`
+
+```python
+@dataclass
+class VersificationMatchReport:
+    project_name: str
+    best_match: VersificationType       # what estimate_versification() returned
+    matching_chapters: int              # total_project_chapters − mismatch[winning_vt]  (replaces best_score)
+    scores: dict                        # Dict[VersificationType, float]  0.0–1.0
+    mismatch_counts: dict               # Dict[VersificationType, int]  all-chapter mismatches
+    total_differentiating_chapters: int
+    total_project_chapters: int
+    status: str                         # "matched" | "tied" | "unknown"
+    notes: str
+```
+
+---
+
+### Changes to `describe_versification_match()` — notes generation
+
+- **`"matched"`**: `"Best match: {name} ({score:.1f}% of project chapters match)"`
+- **`"tied"` (differentiating chapters exist)**: `"Tied at {score:.1f}%: {tied_names}. {winner} chosen as most common."`
+- **`"tied"` (0 differentiating chapters)**: `"All {n} project chapters are the same in all versifications; all versifications match equally ({score:.1f}%). ENGLISH chosen by preference."`
+- **`"unknown"`**: `"Best score {score:.1f}% is below threshold {threshold:.1f}%. No versification matched well enough. Settings.xml will use English (4) as a fallback. Mismatch counts per standard: {per_standard_summary}"`
+
+---
+
+### `.env` change
+
+```dotenv
+# Threshold below which a translation's best versification match score is treated as UNKNOWN.
+# Score = fraction of all project chapters (excluding spurious placeholders) that match the
+# best-fitting standard versification. Range: 0.0–1.0.
+# Run `poetry run python ebible_code/analyse_versification.py` to inspect the distribution.
+VERSIFICATION_MATCH_THRESHOLD=0.0
+```
+
+Remove `VERSIFICATION_UNKNOWN_THRESHOLD`.
+
+---
+
+### Verification
+
+#### V7a — `compute_versification_scores()` unit test
+
+Synthetic verse data with known invariant and differentiating chapters. Assert:
+- `mismatch_counts` reflects all-chapter mismatches (not differentiating-only)
+- `scores` equal `(total − mismatches) / total`
+- `total_project_chapters` excludes spurious chapters
+
+#### V7b — Tie-break preference order
+
+Construct synthetic `.vrs` where VULGATE and RUSSIAN_PROTESTANT tie; assert `estimate_versification()` returns `RUSSIAN_PROTESTANT` (ranked higher in preference order).
+
+#### V7c — Updated V2 synthetic fixture tests
+
+Update `high_mismatch.vrs` expected return: with `VERSIFICATION_MATCH_THRESHOLD=0.0`, returns
+whichever versification scores highest (not `UNKNOWN`). With threshold set above that best score,
+`describe_versification_match()` returns status `"unknown"`.
+
+Update `nt_only_invariant.vrs` expected status: `"tied"` (was `"indistinguishable"`).
+
+#### V7d — V3 real-data tests
+
+All six projects should return the same `VersificationType` as before (scoring changes absolute
+values but not ranking for projects with strong differentiating signal). Update
+`monkeypatch.setenv` key from `VERSIFICATION_UNKNOWN_THRESHOLD` to `VERSIFICATION_MATCH_THRESHOLD`.
+
+#### V7e — CSV output test (extends V6)
+
+Assert new column headers present and in correct order. Assert `score_*` values are floats with
+1 decimal place. Assert `mismatch_*` values ≥ old differentiating-only mismatch values (all-chapter
+count is always ≥ differentiating-only count). Assert `status` values are only
+`"matched"` | `"tied"` | `"unknown"`.
+
+---
+
+## Phase 8: Threshold Calibration (requires user input)
+
+Run `poetry run python ebible_code/analyse_versification.py` against full data. Review histogram
+(vertical line at `VERSIFICATION_MATCH_THRESHOLD`). Identify natural breakpoint in the new
+all-chapters score distribution. Set `VERSIFICATION_MATCH_THRESHOLD` in `.env`.

@@ -707,11 +707,10 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
             # Write Settings.xml
             vrs_type = estimate_versification(project_dir)
             df.loc[index, 'status_inferred_versification'] = vrs_type.value
-            xml_vrs_type = VersificationType.ENGLISH if vrs_type == VersificationType.UNKNOWN else vrs_type
             _lang = row.get('languageNameInEnglish', '')
             _title = row.get('title', '')
             success = write_settings_file(
-                project_dir, lang_code, xml_vrs_type,
+                project_dir, lang_code, vrs_type,
                 language_name_in_english='' if pd.isna(_lang) else str(_lang),
                 full_name='' if pd.isna(_title) else str(_title),
             )
@@ -1076,11 +1075,10 @@ def update_all_settings(
                     root_logger.info(f"Updating settings for {translation_id} in {project_dir}")
                     old_versification = row.get('status_inferred_versification')
                     vrs_type = estimate_versification(project_dir)
-                    xml_vrs_type = VersificationType.ENGLISH if vrs_type == VersificationType.UNKNOWN else vrs_type
                     _lang = row.get('languageNameInEnglish', '')
                     _title = row.get('title', '')
                     success = write_settings_file(
-                        project_dir, lang_code, xml_vrs_type,
+                        project_dir, lang_code, vrs_type,
                         language_name_in_english='' if pd.isna(_lang) else str(_lang),
                         full_name='' if pd.isna(_title) else str(_title),
                     )
@@ -1387,17 +1385,6 @@ def main() -> None:
         actions_df, downloads_folder, projects_folder,
         private_projects_folder
     )
-
-    # Report UNKNOWN versifications from this batch (value 0 = below VERSIFICATION_UNKNOWN_THRESHOLD)
-    unknown_vrs = actions_df[actions_df['status_inferred_versification'] == 0]
-    if not unknown_vrs.empty:
-        n = len(unknown_vrs)
-        root_logger.warning(
-            f"\nWARNING: {n} translation(s) have UNKNOWN versification (value 0).\n"
-            f"Settings.xml for these projects uses English (4) as a fallback.\n"
-            f"Review {status_path}, filtering for status_inferred_versification == 0.\n"
-            f"Run ebible_code/analyse_versification.py for detailed mismatch analysis."
-        )
 
     # Perform licence checks for existing projects if needed
     actions_df = check_and_update_licences(actions_df)

@@ -134,10 +134,13 @@ def compute_versification_scores(
     """
     Scores a project's verse data against all standard versifications.
 
+    Compares every non-spurious project chapter against each standard.
+    Scores are percentages (0.0–100.0): matching_chapters / total_project_chapters * 100.
+
     Returns a dict with:
-      'scores': Dict[VersificationType, float]
-      'mismatch_counts': Dict[VersificationType, int]
-      'project_differentiating_chapters': Set[Tuple[str, int]]
+      'scores': Dict[VersificationType, float]  — percentage 0.0–100.0
+      'mismatch_counts': Dict[VersificationType, int]  — ALL-chapter mismatches per standard
+      'project_differentiating_chapters': Set[Tuple[str, int]]  — for reporting only
       'total_project_chapters': int
     """
     # Exclude spurious Versification.load() placeholder chapters: entries where the project
@@ -148,29 +151,30 @@ def compute_versification_scores(
         if project_verse_data[bc] == 1
         and any(std.get(bc, 0) > 1 for std in STANDARD_VERSE_DATA.values())
     }
-    # Differentiating chapters: non-invariant, non-spurious chapters that can distinguish standards.
-    project_differentiating_chapters: Set[Tuple[str, int]] = {
-        bc for bc in project_verse_data
-        if bc not in INVARIANT_CHAPTERS and bc not in spurious_chapters
+    # Valid (non-spurious) chapters used for all scoring.
+    valid_chapters: Dict[Tuple[str, int], int] = {
+        bc: v for bc, v in project_verse_data.items() if bc not in spurious_chapters
     }
-    # Valid chapters = all project chapters excluding spurious placeholders.
-    total_project_chapters = len(project_verse_data) - len(spurious_chapters)
-    n = len(project_differentiating_chapters)
+    total_project_chapters = len(valid_chapters)
+    # Differentiating chapters: non-invariant valid chapters (retained for reporting only).
+    project_differentiating_chapters: Set[Tuple[str, int]] = {
+        bc for bc in valid_chapters if bc not in INVARIANT_CHAPTERS
+    }
 
     scores: Dict[VersificationType, float] = {}
     mismatch_counts: Dict[VersificationType, int] = {}
 
     for vt, std_data in STANDARD_VERSE_DATA.items():
-        if n == 0:
+        if total_project_chapters == 0:
             scores[vt] = 0.0
             mismatch_counts[vt] = 0
         else:
-            matching = sum(
-                1 for bc in project_differentiating_chapters
-                if project_verse_data[bc] == std_data.get(bc)
+            mismatches = sum(
+                1 for bc, v in valid_chapters.items()
+                if v != std_data.get(bc)
             )
-            scores[vt] = matching / n
-            mismatch_counts[vt] = n - matching
+            scores[vt] = ((total_project_chapters - mismatches) / total_project_chapters) * 100
+            mismatch_counts[vt] = mismatches
 
     return {
         'scores': scores,
@@ -180,8 +184,25 @@ def compute_versification_scores(
     }
 
 
+# Tie-break preference order when multiple versifications share the top score.
+# Ordered by frequency in eBible corpus: most common first.
+_VT_PREFERENCE_ORDER = [
+    VersificationType.ENGLISH,
+    VersificationType.ORIGINAL,
+    VersificationType.RUSSIAN_PROTESTANT,
+    VersificationType.RUSSIAN_ORTHODOX,
+    VersificationType.SEPTUAGINT,
+    VersificationType.VULGATE,
+]
+
+
 def estimate_versification(project_path: Path) -> VersificationType:
-    """Estimates the versification type for a project by scoring its .vrs file against all standards."""
+    """Estimates the versification type for a project by scoring its .vrs file against all standards.
+
+    Returns a concrete VersificationType (never UNKNOWN). When the best score is below
+    VERSIFICATION_MATCH_THRESHOLD, returns ENGLISH as a safe fallback; the caller can detect
+    this via describe_versification_match() which sets status='unknown'.
+    """
     project_name = project_path.name
     project_vrs_path = project_path / f"{project_name}.vrs"
 
@@ -204,28 +225,27 @@ def estimate_versification(project_path: Path) -> VersificationType:
         return VersificationType.ENGLISH
 
     result = compute_versification_scores(project_verse_data)
-    project_differentiating_chapters = result['project_differentiating_chapters']
     scores: Dict[VersificationType, float] = result['scores']
 
-    if not project_differentiating_chapters:
-        logger.info(f"{project_name}: No differentiating chapters. Indistinguishable; defaulting to ENGLISH.")
+    if not scores:
         return VersificationType.ENGLISH
 
     try:
-        threshold = float(os.environ.get('VERSIFICATION_UNKNOWN_THRESHOLD', '0.0'))
+        threshold = float(os.environ.get('VERSIFICATION_MATCH_THRESHOLD', '0.0'))
     except ValueError:
         threshold = 0.0
 
-    best_score = max(scores.values()) if scores else 0.0
+    best_score = max(scores.values())
 
     if best_score < threshold:
-        logger.info(f"{project_name}: Best score {best_score:.4f} < threshold {threshold:.4f}. Returning UNKNOWN.")
-        return VersificationType.UNKNOWN
-
-    best_types = [vt for vt, s in scores.items() if s == best_score]
-    if VersificationType.ENGLISH in best_types:
+        logger.info(f"{project_name}: Best score {best_score:.1f}% < threshold {threshold:.1f}%. Returning ENGLISH (unknown fallback).")
         return VersificationType.ENGLISH
-    return best_types[0]
+
+    best_types = {vt for vt, s in scores.items() if s == best_score}
+    for vt in _VT_PREFERENCE_ORDER:
+        if vt in best_types:
+            return vt
+    return next(iter(best_types))
 
 
 def write_settings_file(

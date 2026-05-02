@@ -56,8 +56,10 @@ def test_csv_created_and_nonempty(analyse_output):
 def test_csv_has_expected_columns(analyse_output):
     _, csv_path, _ = analyse_output
     first_line = csv_path.read_text(encoding="utf-8").splitlines()[0]
-    for col in ("project_name", "status", "best_score", "score_ENGLISH",
-                "score_VULGATE", "score_RUSSIAN_ORTHODOX", "notes"):
+    for col in ("project_name", "best_match", "status", "matching_chapters",
+                "total_project_chapters", "total_differentiating_chapters",
+                "mismatch_ENGLISH", "mismatch_VULGATE", "mismatch_RUSSIAN_ORTHODOX",
+                "score_ENGLISH", "score_VULGATE", "score_RUSSIAN_ORTHODOX", "notes"):
         assert col in first_line, f"Column '{col}' missing from CSV header"
 
 

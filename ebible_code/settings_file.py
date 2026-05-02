@@ -3,10 +3,9 @@ import sys
 import codecs
 import textwrap
 from pathlib import Path
-from typing import Iterator, Tuple, Dict, List, Optional, Set
+from typing import Iterable, Iterator, Tuple, Dict, List, Optional, Set
 import xml.etree.ElementTree as ET
 import logging # Import logging
-from collections import defaultdict
 from datetime import datetime
 import re
 
@@ -47,22 +46,6 @@ BOOK_ORDER = [
     "TDX", "NDX", "XXA", "XXB", "XXC", "XXD", "XXE", "XXF", "XXG"
 ]
 BOOK_SORT_KEY = {book: i for i, book in enumerate(BOOK_ORDER)}
-
-# Regex for parsing verse strings like "1", "1a", "1-2" from corpus VerseRef.verse
-VERSE_STR_PATTERN = re.compile(r"(\d+)([a-zA-Z]?)")
-
-def _parse_verse_string_for_vrs(verse_str: str) -> tuple[int, str]:
-    """Parses a verse string (e.g., '1', '1a') into number and subdivision for VRS generation."""
-    # Simplified parser focusing on the leading integer part for max verse counting.
-    if not verse_str: return 0, ""
-    match = re.match(r"(\d+)", verse_str) # Match leading digits
-    if match:
-        return int(match.group(1)), "" # Subdivision not critical for max verse in this context
-    try:
-        return int(verse_str), "" # Try direct conversion if no complex pattern
-    except ValueError:
-        logger.warning(f"Could not parse verse string '{verse_str}' into an integer for VRS generation.")
-        return 0, ""
 
 
 def populate_standard_versifications() -> None:
@@ -287,6 +270,53 @@ def write_settings_file(
         return False
 
 
+_VERSE_NUM_RE = re.compile(r"^(\d+)")
+
+
+def scan_usfm_verse_data(
+    file_paths: Iterable[Path],
+    encoding: str = "utf-8",
+) -> Dict[str, Dict[int, int]]:
+    """Scan USFM/SFM files and return {book_id: {chapter_num: max_verse_num}}.
+
+    Reads only \\id, \\c, and \\v markers; ignores all other USFM content.
+    Much faster than full USFM parsing when only verse structure is needed.
+    """
+    verse_data: Dict[str, Dict[int, int]] = {}
+    for file_path in file_paths:
+        current_book: Optional[str] = None
+        current_chapter: int = 0
+        try:
+            with open(file_path, encoding=encoding, errors="replace") as fh:
+                for raw_line in fh:
+                    line = raw_line.strip()
+                    if not line or line[0] != "\\":
+                        continue
+                    if line.startswith(r"\id "):
+                        parts = line.split()
+                        current_book = parts[1].upper() if len(parts) >= 2 else None
+                        current_chapter = 0
+                    elif line.startswith(r"\c "):
+                        parts = line.split()
+                        try:
+                            current_chapter = int(parts[1]) if len(parts) >= 2 else 0
+                        except ValueError:
+                            current_chapter = 0
+                    elif line.startswith(r"\v ") and current_book and current_chapter > 0:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            m = _VERSE_NUM_RE.match(parts[1].split("-")[0])
+                            if m:
+                                verse_num = int(m.group(1))
+                                if verse_num > 0:
+                                    book_data = verse_data.setdefault(current_book, {})
+                                    if verse_num > book_data.get(current_chapter, 0):
+                                        book_data[current_chapter] = verse_num
+        except OSError as e:
+            logger.warning(f"Could not read {file_path}: {e}")
+    return verse_data
+
+
 def generate_vrs_from_project(project_path: Path) -> Optional[Path]:
     """
     Generates a .vrs file from the actual content of a Paratext project.
@@ -300,53 +330,16 @@ def generate_vrs_from_project(project_path: Path) -> Optional[Path]:
         logger.error(f"Project path does not exist or is not a directory: {project_path}")
         return None
 
-    try:
-        # Use UsfmFileTextCorpus which does not strictly require Settings.xml.
-        # Provide a default versification (English) for parsing purposes, as the project's
-        # true versification is what we are trying to determine.
-        from machine.corpora import UsfmFileTextCorpus # Import UsfmFileTextCorpus
-        default_vrs_for_parsing = Versification.get_builtin(VersificationType.ENGLISH)
-
-        # Since all the projects are from eBible.org, they all have the same ".SFM" extension.
-        corpus = UsfmFileTextCorpus(str(project_path), file_pattern="*.SFM", versification=default_vrs_for_parsing)
-        
-    except Exception as e: # Catching generic Exception here might be too broad; consider more specific exceptions from ParatextTextCorpus
-        logger.error(f"Could not initialize UsfmFileTextCorpus for {project_name}: {e}")
+    sfm_files = list(project_path.glob("*.SFM"))
+    if not sfm_files:
+        logger.warning(f"No .SFM files found in {project_path}. Skipping VRS generation.")
         return None
 
-    # Structure: {book_id: {chapter_num: max_verse_num}}
-    verse_data = defaultdict(lambda: defaultdict(int))
-    processed_verse_refs_count = 0
+    verse_data = scan_usfm_verse_data(sfm_files)
+    logger.debug(f"Scanned {len(sfm_files)} SFM files for {project_name}.")
 
-    for text_row in corpus: # Iterate directly over the corpus
-        processed_verse_refs_count += 1
-        verse_ref = text_row.ref # Get the VerseRef from the TextRow
-        
-        book_id = verse_ref.book.upper() # Ensure uppercase book ID
-
-        chapter_num = int(verse_ref.chapter) # Convert chapter to int
-        
-        # verse_ref.verse can be like '1', '1a', '1-2'. We need the primary numeric part.
-        # For '1-2', parse_verse_string('1-2') might fail if not handled.
-        # ParatextTextCorpus usually yields individual verse refs, so '1-2' as verse_ref.verse is less common.
-        # We take the part before any hyphen (for ranges) and then parse the number.
-        verse_num_str_to_parse = verse_ref.verse.split('-')[0] 
-        verse_num, _ = _parse_verse_string_for_vrs(verse_num_str_to_parse)
-
-        if chapter_num > 0 and verse_num > 0: # Ensure valid chapter and verse numbers
-            verse_data[book_id][chapter_num] = max(
-                verse_data[book_id][chapter_num], verse_num
-            )
-        elif chapter_num <= 0:
-            logger.warning(f"Skipping verse_ref with invalid chapter {chapter_num} in {book_id} for {project_name}")
-    
-    logger.debug(f"Processed {processed_verse_refs_count} verse references for {project_name}.")
-
-    if processed_verse_refs_count == 0:
-        return None
-    
     if not verse_data:
-        logger.warning(f"No valid verse data collected for project {project_name} after processing {processed_verse_refs_count} refs. Skipping VRS generation.")
+        logger.warning(f"No valid verse data collected for project {project_name}. Skipping VRS generation.")
         return None
 
     # --- Generate .vrs file content ---

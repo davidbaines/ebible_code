@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
+from machine.corpora import create_versification_ref_corpus
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -34,16 +35,11 @@ METADATA_SOURCE_COLUMNS = [
     "status_inferred_versification",
 ]
 
-VREF_LENGTH = 41899
-
-
-def build_vref_list(vref_path: Path) -> list:
-    """Read vref.txt and return a list of verse reference strings like 'GEN 1:1'."""
-    with open(vref_path, "r", encoding="utf-8") as f:
-        lines = [line.strip() for line in f if line.strip()]
-    if not lines:
-        raise ValueError(f"vref file is empty: {vref_path}")
-    return lines
+def build_vref_list() -> list:
+    """Return the canonical list of verse reference strings (e.g. 'GEN 1:1') from machine.corpora."""
+    corpus = create_versification_ref_corpus()
+    with corpus.get_rows() as rows:
+        return [str(row.ref) for row in rows]
 
 
 def load_and_filter_metadata(metadata_path: Path) -> pd.DataFrame:
@@ -79,7 +75,7 @@ def load_and_filter_metadata(metadata_path: Path) -> pd.DataFrame:
 
 
 def validate_corpus_files(candidates: pd.DataFrame, ebible_data_dir: Path,
-                          vref_length: int = VREF_LENGTH,
+                          vref_length: int,
                           min_lines: int = 400,
                           min_chars: int = 7,
                           _input=input) -> tuple:
@@ -193,7 +189,6 @@ def _parse_args():
             "Convert eBible corpus .txt files to Parquet format for HuggingFace.\n\n"
             "All paths are configured via .env:\n"
             "  EBIBLE_DATA_DIR              Root of the data repository\n"
-            "  VREF_FILENAME                Filename of vref.txt under metadata/\n"
             "  METADATA_FILENAME            Filename of ebible_status.csv under metadata/\n"
             "  HUGGINGFACE_OUTPUT_FOLDER    Output directory for all output files\n"
             "  HUGGINGFACE_MAIN_PARQUET_FILENAME     e.g. main.parquet\n"
@@ -217,7 +212,6 @@ def main():
         print(f"Error: EBIBLE_DATA_DIR does not exist: {ebible_data_dir}", file=sys.stderr)
         sys.exit(1)
 
-    vref_path = ebible_data_dir / "metadata" / os.getenv("VREF_FILENAME", "vref.txt")
     metadata_path = ebible_data_dir / "metadata" / os.getenv("METADATA_FILENAME", "ebible_status.csv")
     hf_output_dir = ebible_data_dir / os.getenv("HUGGINGFACE_OUTPUT_FOLDER", "huggingface")
     main_parquet_path = hf_output_dir / os.getenv("HUGGINGFACE_MAIN_PARQUET_FILENAME", "main.parquet")
@@ -225,18 +219,17 @@ def main():
     readme_path = hf_output_dir / "README.md"
     template_path = Path(__file__).parent.parent / "assets" / "parquet_README_template.md"
 
-    for path, label in [(vref_path, "VREF_FILENAME"), (metadata_path, "METADATA_FILENAME")]:
-        if not path.exists():
-            print(f"Error: {label} not found: {path}", file=sys.stderr)
-            sys.exit(1)
+    if not metadata_path.exists():
+        print(f"Error: METADATA_FILENAME not found: {metadata_path}", file=sys.stderr)
+        sys.exit(1)
 
     if not hf_output_dir.is_dir():
         print(f"Error: HUGGINGFACE_OUTPUT_FOLDER does not exist: {hf_output_dir}", file=sys.stderr)
         sys.exit(1)
 
-    # Step 1: Load vref
+    # Step 1: Build vref list from machine.corpora
     print("--- Loading vref ---")
-    vref_list = build_vref_list(vref_path)
+    vref_list = build_vref_list()
     print(f"  {len(vref_list)} verse references loaded")
 
     # Step 2: Load and filter metadata

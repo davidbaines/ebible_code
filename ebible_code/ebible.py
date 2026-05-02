@@ -91,8 +91,9 @@ ORIGINAL_COLUMNS = [
 STATUS_COLUMNS = [
     "status_download_path", "status_download_date", "status_unzip_path",
     "status_unzip_date", "status_inferred_versification", "status_settings_xml_date",
+    "status_vrs_update_date",
     "status_extract_path", "status_extract_date", "status_extract_hash", "status_extract_hash_date",
-    "wildebeest_hash",  "wildebeest_hash_date", "status_last_error", 
+    "wildebeest_hash",  "wildebeest_hash_date", "status_last_error",
 ]
 
 
@@ -696,13 +697,11 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
             rename_usfm(project_dir)
 
             # Generate project-specific .vrs file before writing Settings.xml
-            try:
-                root_logger.info(f"Generating project .vrs file for {translation_id}")
-                generate_vrs_from_project(project_dir)
-            except Exception as e_vrs:
-                root_logger.error(f"Error generating project .vrs for {translation_id}: {e_vrs}")
-                df.loc[index, "status_last_error"] = f"Project VRS generation failed: {e_vrs}"
-                # Continue to attempt settings file write; scoring will use fallback or default.
+            root_logger.info(f"Generating project .vrs file for {translation_id}")
+            generate_vrs_from_project(project_dir)
+            current_update_date = row.get('UpdateDate')
+            if not pd.isna(current_update_date):
+                df.loc[index, 'status_vrs_update_date'] = str(current_update_date)
 
             # Write Settings.xml
             vrs_type = estimate_versification(project_dir)
@@ -736,6 +735,60 @@ def unzip_and_process_files(df: pd.DataFrame, downloads_folder: Path, projects_f
                     root_logger.warning(f"Could not remove failed unzip dir {project_dir}: {rm_e}")
 
     root_logger.info(f"Finished processing. Successfully processed {processed_count}/{count} projects.")
+    return df
+
+
+def generate_missing_vrs_files(df: pd.DataFrame) -> pd.DataFrame:
+    """Generates .vrs and updates Settings.xml for existing projects that are missing their .vrs file.
+
+    Runs only on projects already unzipped (status_unzip_path set) that were not re-unzipped
+    this run. With the lightweight USFM scanner this is fast — no full re-parse needed.
+    """
+    candidates = df[
+        ~df['action_needed_unzip'] &
+        df['status_unzip_path'].notna() &
+        df['status_unzip_date'].notna()
+    ]
+
+    to_process = [
+        (index, row)
+        for index, row in candidates.iterrows()
+        if (
+            Path(str(row['status_unzip_path'])).is_dir()
+            and not (Path(str(row['status_unzip_path'])) / f"{row['translationId']}.vrs").is_file()
+        )
+    ]
+
+    if not to_process:
+        return df
+
+    root_logger.info(f"Generating missing .vrs files for {len(to_process)} projects...")
+    for index, row in tqdm(to_process, desc="Generating missing .vrs"):
+        translation_id = row['translationId']
+        lang_code = row['languageCode']
+        project_dir = Path(str(row['status_unzip_path']))
+
+        result = generate_vrs_from_project(project_dir)
+        if result is None:
+            root_logger.warning(f"Could not generate .vrs for {translation_id}; skipping settings update.")
+            continue
+
+        current_update_date = row.get('UpdateDate')
+        if not pd.isna(current_update_date):
+            df.loc[index, 'status_vrs_update_date'] = str(current_update_date)
+
+        vrs_type = estimate_versification(project_dir)
+        df.loc[index, 'status_inferred_versification'] = vrs_type.value
+        _lang = row.get('languageNameInEnglish', '')
+        _title = row.get('title', '')
+        success = write_settings_file(
+            project_dir, lang_code, vrs_type,
+            language_name_in_english='' if pd.isna(_lang) else str(_lang),
+            full_name='' if pd.isna(_title) else str(_title),
+        )
+        if success:
+            df.loc[index, 'status_settings_xml_date'] = TODAY_STR
+
     return df
 
 
@@ -1386,6 +1439,9 @@ def main() -> None:
         private_projects_folder
     )
 
+    # Generate .vrs for any existing projects that are missing it
+    actions_df = generate_missing_vrs_files(actions_df)
+
     # Perform licence checks for existing projects if needed
     actions_df = check_and_update_licences(actions_df)
 
@@ -1434,7 +1490,14 @@ def main() -> None:
     else:
         report_scope_df = status_df
 
-    missing_extracts_df = report_scope_df[report_scope_df['status_extract_date'].isna() & report_scope_df['downloadable'] & ((report_scope_df['OTverses'] + report_scope_df['NTverses']) >= args.verse_threshold)]
+    verse_filter = report_scope_df['downloadable'] & ((report_scope_df['OTverses'] + report_scope_df['NTverses']) >= args.verse_threshold)
+    missing_extracts_df = report_scope_df[report_scope_df['status_extract_date'].isna() & verse_filter]
+
+    if not args.allow_non_redistributable:
+        non_redist_missing = missing_extracts_df[missing_extracts_df['Redistributable'] == False]
+        missing_extracts_df = missing_extracts_df[missing_extracts_df['Redistributable'] == True]
+        if not non_redist_missing.empty:
+            root_logger.info(f"{len(non_redist_missing)} non-redistributable translations have no extract; rerun with --allow_non_redistributable to process them.")
 
     if not missing_extracts_df.empty:
         root_logger.warning(f"\n{len(missing_extracts_df)} translations appear to be missing extracted corpus files (.txt):")

@@ -44,17 +44,18 @@ def analyse_output(tmp_path_factory):
     metadata_dir = _test_data_dir / "metadata"
     csv_path = metadata_dir / "analyse_versification.csv"
     png_path = metadata_dir / "versification_scores_histogram.png"
-    return result.stdout, csv_path, png_path
+    ranked_png_path = metadata_dir / "versification_scores_ranked.png"
+    return result.stdout, csv_path, png_path, ranked_png_path
 
 
 def test_csv_created_and_nonempty(analyse_output):
-    _, csv_path, _ = analyse_output
+    _, csv_path, _, _ = analyse_output
     assert csv_path.exists(), f"CSV not found at {csv_path}"
     assert csv_path.stat().st_size > 0, "CSV is empty"
 
 
 def test_csv_has_expected_columns(analyse_output):
-    _, csv_path, _ = analyse_output
+    _, csv_path, _, _ = analyse_output
     first_line = csv_path.read_text(encoding="utf-8").splitlines()[0]
     for col in ("project_name", "best_match", "status", "matching_chapters",
                 "total_project_chapters", "total_differentiating_chapters",
@@ -64,12 +65,14 @@ def test_csv_has_expected_columns(analyse_output):
 
 
 def test_png_created_and_nonempty(analyse_output):
-    _, _, png_path = analyse_output
-    assert png_path.exists(), f"PNG not found at {png_path}"
-    assert png_path.stat().st_size > 0, "PNG is empty"
+    _, _, png_path, ranked_png_path = analyse_output
+    assert png_path.exists(), f"Histogram PNG not found at {png_path}"
+    assert png_path.stat().st_size > 0, "Histogram PNG is empty"
+    assert ranked_png_path.exists(), f"Ranked plot PNG not found at {ranked_png_path}"
+    assert ranked_png_path.stat().st_size > 0, "Ranked plot PNG is empty"
 
 
 def test_stdout_contains_total_and_bands(analyse_output):
-    stdout, _, _ = analyse_output
+    stdout, _, _, _ = analyse_output
     assert "Total projects analysed:" in stdout
-    assert "0.0" in stdout  # At least the first band header
+    assert "Ranked plot:" in stdout

@@ -253,14 +253,33 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(10, 6))
     bins = [i * 10 for i in range(11)]  # 0, 10, 20, ..., 100
     ax.hist(best_scores, bins=bins, edgecolor="black", color="steelblue", alpha=0.8)
-    ax.axvline(threshold, color="red", linestyle="--", linewidth=1.5,
-               label=f"Threshold = {threshold:.1f}%")
+    if threshold > 0.0:
+        ax.axvline(threshold, color="red", linestyle="--", linewidth=1.5,
+                   label=f"Threshold = {threshold:.1f}%")
+        ax.legend()
     ax.set_xlabel("Best versification match score (%)")
     ax.set_ylabel("Number of projects")
     ax.set_title("Versification best-match score distribution")
-    ax.legend()
     fig.savefig(png_path, dpi=100)
     plt.close(fig)
+
+    # ---- Ranked score plot (one point per project) ----
+    sorted_scores = sorted(best_scores, reverse=True)
+    ranked_png_path = metadata_dir / "versification_scores_ranked.png"
+    fig2, ax2 = plt.subplots(figsize=(14, 6))
+    ranks = range(1, len(sorted_scores) + 1)
+    ax2.scatter(ranks, sorted_scores, s=4, alpha=0.5, color="steelblue")
+    if threshold > 0.0:
+        ax2.axhline(threshold, color="red", linestyle="--", linewidth=1.5,
+                    label=f"Threshold = {threshold:.1f}%")
+        ax2.legend()
+    ax2.set_xlabel("Project rank (highest score first)")
+    ax2.set_ylabel("Best versification match score (%)")
+    ax2.set_title("Versification match scores — one point per project (sorted)")
+    ax2.set_xlim(0, len(sorted_scores) + 1)
+    ax2.set_ylim(-2, 102)
+    fig2.savefig(ranked_png_path, dpi=100)
+    plt.close(fig2)
 
     # ---- Stdout summary ----
     total = len(reports)
@@ -277,11 +296,12 @@ def main() -> None:
             1 for bs in best_scores
             if lo <= bs < hi or (i == 9 and bs == 100.0)
         )
-        print(f"  {lo:3d}–{hi:3d}: {count}")
+        print(f"  {lo:3d}-{hi:3d}: {count}")
     print(f"\nTied projects (decided by preference order): {tied_count}")
     print(f"Projects currently below threshold ({threshold:.1f}%): {below_threshold}")
-    print(f"\nCSV:       {csv_path}")
-    print(f"Histogram: {png_path}")
+    print(f"\nCSV:          {csv_path}")
+    print(f"Histogram:    {png_path}")
+    print(f"Ranked plot:  {ranked_png_path}")
 
 
 if __name__ == "__main__":

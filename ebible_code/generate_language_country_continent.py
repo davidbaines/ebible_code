@@ -86,8 +86,8 @@ def load_continent_map(csv_path: Path) -> dict[str, str]:
     return result
 
 
-def load_overrides(csv_path: Path) -> dict[str, str]:
-    """Return dict mapping raw_code -> iso_code from the overrides file.
+def load_overrides(csv_path: Path) -> dict[tuple[str, str], str]:
+    """Return dict mapping (translationId, ebible_country_code) -> country_code.
 
     Returns an empty dict if the file does not exist (not an error).
     keep_default_na=False prevents 'NA' being parsed as NaN.
@@ -95,25 +95,27 @@ def load_overrides(csv_path: Path) -> dict[str, str]:
     if not csv_path.exists():
         return {}
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
-    return {
-        str(row["raw_code"]).strip().upper(): str(row["iso_code"]).strip().upper()
-        for _, row in df.iterrows()
-        if row["raw_code"] and row["iso_code"]
-    }
+    result = {}
+    for _, row in df.iterrows():
+        tid = str(row["translationId"]).strip()
+        raw = str(row["ebible_country_code"]).strip().upper()
+        iso = str(row["country_code"]).strip().upper()
+        if tid and raw and iso:
+            result[(tid, raw)] = iso
+    return result
 
 
 def apply_overrides(
     pairs: list[tuple[str, str]],
-    overrides: dict[str, str],
+    overrides: dict[tuple[str, str], str],
 ) -> list[tuple[str, str]]:
-    """Replace any raw country code that has a known override with its ISO equivalent."""
+    """Replace country codes that have a (translationId, ebible_country_code) override entry."""
     if not overrides:
         return pairs
-    result = []
-    for translation_id, country_code in pairs:
-        corrected = overrides.get(country_code, country_code)
-        result.append((translation_id, corrected))
-    return result
+    return [
+        (tid, overrides.get((tid, code), code))
+        for tid, code in pairs
+    ]
 
 
 def build_mapping(
@@ -155,7 +157,8 @@ def main() -> None:
 
     overrides = load_overrides(OVERRIDES_CSV)
     if overrides:
-        print(f"Applying {len(overrides)} country code override(s): {overrides}", file=sys.stderr)
+        summary = ", ".join(f"{tid}:{raw}->{iso}" for (tid, raw), iso in overrides.items())
+        print(f"Applying {len(overrides)} country code override(s): {summary}", file=sys.stderr)
     pairs = apply_overrides(pairs, overrides)
 
     continent_map = load_continent_map(CONTINENT_CSV)

@@ -42,11 +42,12 @@ Downloaded once and committed as `assets/country_continent.csv`. Columns kept: `
 
 | Column | Example | Notes |
 |---|---|---|
-| `raw_code` | `RP` | Code as scraped from ebible.org |
-| `iso_code` | `PH` | Correct ISO 3166-1 alpha-2 code |
+| `translationId` | `tblNT` | eBible translationId the override applies to |
+| `ebible_country_code` | `RP` | Code as scraped from ebible.org for this translation |
+| `country_code` | `PH` | Correct ISO 3166-1 alpha-2 replacement |
 | `notes` | `Legacy Philippines code` | Human-readable reason; kept for auditing |
 
-The override is applied **before** the continent lookup. After applying overrides, the stored `countryCode` is the corrected ISO code (not the raw scraped value). Any raw code still unresolved after overrides triggers a warning — new unknown codes are still surfaced.
+The match key is `(translationId, ebible_country_code)` — both must match for the override to apply. This prevents a bad code from silently correcting a different translation that happens to use the same raw code legitimately. Any raw code still unresolved after overrides triggers a warning — new unknown codes are always surfaced.
 
 ---
 

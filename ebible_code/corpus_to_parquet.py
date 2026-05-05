@@ -33,6 +33,9 @@ METADATA_SOURCE_COLUMNS = [
     "licence_Translation_by",
     # STATUS: versification only
     "status_inferred_versification",
+    # ENRICHMENT columns (Phase 1)
+    "countryCode",
+    "continentCode",
 ]
 
 def build_vref_list() -> list:

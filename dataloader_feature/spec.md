@@ -9,6 +9,7 @@ Add `countryCode` (ISO 3166-1 alpha-2) and `continentCode` (two-letter code) to 
 | File | Type | Description |
 |---|---|---|
 | `assets/country_continent.csv` | Static reference (committed) | Country → continent mapping, sourced from GitHub Gist |
+| `assets/country_code_overrides.csv` | Static reference (committed) | Maps non-standard/legacy country codes to ISO 3166-1 alpha-2 codes |
 | `assets/language_country_continent.csv` | Generated reference (committed) | translationId → countryCode → continentCode |
 | `ebible_code/generate_language_country_continent.py` | New script | Scrapes eBible, joins tables, writes the mapping CSV |
 | `ebible_code/ebible.py` | Modified | Adds ENRICHMENT_COLUMNS; populates countryCode/continentCode at pipeline runtime |
@@ -35,6 +36,18 @@ Source: `https://gist.github.com/stevewithington/20a69c0b6d2ff846ea5d35e5fc47f26
 
 Downloaded once and committed as `assets/country_continent.csv`. Columns kept: `CountryCode` (2-letter, uppercase), `ContinentCode` (2-letter, uppercase). Valid continent codes: `AF`, `AN`, `AS`, `EU`, `NA`, `OC`, `SA`.
 
+### 3. Country code overrides
+
+`assets/country_code_overrides.csv` — committed static file, manually maintained. Maps non-standard or legacy country codes (as used by ebible.org) to their correct ISO 3166-1 alpha-2 equivalents, so they resolve against the continent mapping.
+
+| Column | Example | Notes |
+|---|---|---|
+| `raw_code` | `RP` | Code as scraped from ebible.org |
+| `iso_code` | `PH` | Correct ISO 3166-1 alpha-2 code |
+| `notes` | `Legacy Philippines code` | Human-readable reason; kept for auditing |
+
+The override is applied **before** the continent lookup. After applying overrides, the stored `countryCode` is the corrected ISO code (not the raw scraped value). Any raw code still unresolved after overrides triggers a warning — new unknown codes are still surfaced.
+
 ---
 
 ## New Script: `ebible_code/generate_language_country_continent.py`
@@ -42,6 +55,7 @@ Downloaded once and committed as `assets/country_continent.csv`. Columns kept: `
 ### Inputs
 - Live HTTP fetch of `https://ebible.org/Scriptures/`
 - `assets/country_continent.csv` (must exist before running)
+- `assets/country_code_overrides.csv` (applied if present; missing file is not an error)
 
 ### Algorithm
 
@@ -50,10 +64,11 @@ Downloaded once and committed as `assets/country_continent.csv`. Columns kept: `
    - Extract `countryCode` from the `href` of the first `<a>` in the Territory cell matching `country.php?c=XX`.
    - Extract `translationId` from the `href` of the first `<a>` in the Language cell (col 2) matching `details.php?id=XXX`.
    - Skip rows where either pattern is absent.
-3. Read `assets/country_continent.csv`; build a dict `countryCode → continentCode`.
-4. Join: for each `(translationId, countryCode)` pair, look up `continentCode`.
-5. Warn to stderr for any `countryCode` not found in the continent mapping.
-6. Write `assets/language_country_continent.csv`.
+3. Load `assets/country_code_overrides.csv` (if present) and apply: replace any scraped `countryCode` that matches a `raw_code` entry with its `iso_code`.
+4. Read `assets/country_continent.csv`; build a dict `countryCode → continentCode`.
+5. Join: for each `(translationId, countryCode)` pair, look up `continentCode`.
+6. Warn to stderr for any `countryCode` still not found in the continent mapping after overrides.
+7. Write `assets/language_country_continent.csv`.
 
 ### Output schema
 
@@ -125,7 +140,8 @@ The existing guard `present = [c for c in METADATA_SOURCE_COLUMNS if c in df.col
 3. All `countryCode` values match `^[A-Z]{2}$`.
 4. All `continentCode` values are in `{AF, AN, AS, EU, NA, OC, SA}`.
 5. No duplicate `translationId` values.
-6. Spot-check: `engKJV` maps to `GB` / `EU`.
+6. Spot-check: `engBBE` maps to `GB` / `EU` (note: `engKJV` is not listed on the Scriptures page).
+7. Known override applied: any translation with raw code `RP` stores `countryCode = PH`, `continentCode = AS`.
 
 ### `ebible.py` pipeline
 
@@ -153,3 +169,6 @@ The existing guard `present = [c for c in METADATA_SOURCE_COLUMNS if c in df.col
 | `test_enrich_is_idempotent` | Re-running enrich does not overwrite existing values |
 | `test_enrich_missing_file` | Function returns df unchanged when CSV is absent |
 | `test_metadata_parquet_includes_columns` | (integration) `metadata.parquet` has both new columns when source data is present |
+| `test_override_applied` | `RP` raw code is replaced by `PH` before continent lookup; result is `PH`/`AS` |
+| `test_override_missing_file_ok` | Script runs without error when overrides file is absent |
+| `test_override_unknown_after_override_warns` | Code not in overrides and not in continent map still triggers warning |

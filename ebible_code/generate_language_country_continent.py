@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 SCRIPTURES_URL = "https://ebible.org/Scriptures/"
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 CONTINENT_CSV = ASSETS_DIR / "country_continent.csv"
+OVERRIDES_CSV = ASSETS_DIR / "country_code_overrides.csv"
 OUTPUT_CSV = ASSETS_DIR / "language_country_continent.csv"
 
 
@@ -85,6 +86,36 @@ def load_continent_map(csv_path: Path) -> dict[str, str]:
     return result
 
 
+def load_overrides(csv_path: Path) -> dict[str, str]:
+    """Return dict mapping raw_code -> iso_code from the overrides file.
+
+    Returns an empty dict if the file does not exist (not an error).
+    keep_default_na=False prevents 'NA' being parsed as NaN.
+    """
+    if not csv_path.exists():
+        return {}
+    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+    return {
+        str(row["raw_code"]).strip().upper(): str(row["iso_code"]).strip().upper()
+        for _, row in df.iterrows()
+        if row["raw_code"] and row["iso_code"]
+    }
+
+
+def apply_overrides(
+    pairs: list[tuple[str, str]],
+    overrides: dict[str, str],
+) -> list[tuple[str, str]]:
+    """Replace any raw country code that has a known override with its ISO equivalent."""
+    if not overrides:
+        return pairs
+    result = []
+    for translation_id, country_code in pairs:
+        corrected = overrides.get(country_code, country_code)
+        result.append((translation_id, corrected))
+    return result
+
+
 def build_mapping(
     pairs: list[tuple[str, str]],
     continent_map: dict[str, str],
@@ -121,6 +152,11 @@ def main() -> None:
 
     print(f"Fetching {SCRIPTURES_URL} ...", file=sys.stderr)
     pairs = fetch_scriptures_table(SCRIPTURES_URL)
+
+    overrides = load_overrides(OVERRIDES_CSV)
+    if overrides:
+        print(f"Applying {len(overrides)} country code override(s): {overrides}", file=sys.stderr)
+    pairs = apply_overrides(pairs, overrides)
 
     continent_map = load_continent_map(CONTINENT_CSV)
     df = build_mapping(pairs, continent_map)

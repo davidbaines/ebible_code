@@ -10,9 +10,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "ebible_code"))
 
 from generate_language_country_continent import (
+    apply_overrides,
     build_mapping,
     fetch_scriptures_table,
     load_continent_map,
+    load_overrides,
 )
 from ebible import enrich_with_country_data
 
@@ -214,3 +216,56 @@ def test_enrich_unknown_id_warns(tmp_assets, capsys):
     df = _make_status([("unknownXXX", float("nan"), float("nan"))])
     enrich_with_country_data(df, tmp_assets)
     # Warning goes to the logger, not stderr — just check it doesn't raise
+
+
+# ---------------------------------------------------------------------------
+# Tests for country code overrides
+# ---------------------------------------------------------------------------
+
+OVERRIDES_CSV = "raw_code,iso_code,notes\nRP,PH,Legacy Philippines code\n"
+
+
+def test_override_applied(tmp_path):
+    path = tmp_path / "country_code_overrides.csv"
+    path.write_text(OVERRIDES_CSV)
+    overrides = load_overrides(path)
+    pairs = [("filRP", "RP"), ("engBBE", "GB")]
+    result = apply_overrides(pairs, overrides)
+    assert result[0] == ("filRP", "PH")
+    assert result[1] == ("engBBE", "GB")
+
+
+def test_override_full_pipeline(tmp_path):
+    # RP → PH → AS in a complete end-to-end join
+    overrides_path = tmp_path / "country_code_overrides.csv"
+    overrides_path.write_text(OVERRIDES_CSV)
+    continent_path = tmp_path / "cc.csv"
+    continent_path.write_text("CountryCode,ContinentCode\nPH,AS\nGB,EU\n")
+
+    overrides = load_overrides(overrides_path)
+    pairs = [("filRP", "RP"), ("engBBE", "GB")]
+    pairs = apply_overrides(pairs, overrides)
+    continent_map = load_continent_map(continent_path)
+    df = build_mapping(pairs, continent_map)
+
+    rp_row = df[df["translationId"] == "filRP"].iloc[0]
+    assert rp_row["countryCode"] == "PH"
+    assert rp_row["continentCode"] == "AS"
+
+
+def test_override_missing_file_ok(tmp_path):
+    # No overrides file — load_overrides returns empty dict, no exception
+    overrides = load_overrides(tmp_path / "nonexistent.csv")
+    assert overrides == {}
+    pairs = [("engBBE", "GB")]
+    result = apply_overrides(pairs, overrides)
+    assert result == [("engBBE", "GB")]
+
+
+def test_override_unknown_after_override_warns(capsys):
+    # Code not in overrides and not in continent map still triggers warning in build_mapping
+    pairs = [("xyzUNK", "ZZ")]
+    df = build_mapping(pairs, continent_map={"GB": "EU"})
+    captured = capsys.readouterr()
+    assert "ZZ" in captured.err
+    assert df.at[0, "continentCode"] == ""

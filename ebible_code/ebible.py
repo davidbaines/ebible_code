@@ -101,10 +101,13 @@ LICENCE_COLUMNS = [
     "licence_ID", "licence_File", "licence_Language", "licence_Dialect",
     "licence_Vernacular_Title", "licence_Licence_Type", "licence_Licence_Version",
     "licence_CC_Licence_Link", "licence_Copyright_Holder", "licence_Copyright_Years",
-    "licence_Translation_by", "licence_date_read" 
+    "licence_Translation_by", "licence_date_read"
 ]
+
+ENRICHMENT_COLUMNS = ["countryCode", "continentCode"]
+
 # ALL_STATUS_COLUMNS is updated automatically by concatenating the lists
-ALL_STATUS_COLUMNS = ORIGINAL_COLUMNS + LICENCE_COLUMNS + STATUS_COLUMNS 
+ALL_STATUS_COLUMNS = ORIGINAL_COLUMNS + LICENCE_COLUMNS + STATUS_COLUMNS + ENRICHMENT_COLUMNS
 
 
 def make_directories(dirs_to_create: List[Path]) -> None:
@@ -1242,6 +1245,44 @@ def calculate_extract_hashes(df: pd.DataFrame) -> pd.DataFrame:
     root_logger.info(f"Finished extract hash (status_extract_hash) calculation. Successfully hashed {hashed_count}/{count} files.")
     return df
 
+
+def enrich_with_country_data(df: pd.DataFrame, assets_dir: Path) -> pd.DataFrame:
+    """Fill countryCode and continentCode from assets/language_country_continent.csv.
+
+    Only fills rows where countryCode is currently NaN (idempotent).
+    Warns for any translationId in df not found in the mapping file.
+    Returns df unchanged if the mapping file does not exist.
+    """
+    mapping_path = assets_dir / "language_country_continent.csv"
+    if not mapping_path.exists():
+        root_logger.warning(
+            f"Country enrichment skipped: {mapping_path} not found. "
+            "Run ebible_code/generate_language_country_continent.py to create it."
+        )
+        return df
+
+    mapping = pd.read_csv(mapping_path, dtype=str, keep_default_na=False)
+    mapping = mapping.set_index("translationId")
+
+    needs_enrichment = df["countryCode"].isna() | (df["countryCode"] == "")
+    missing_ids = set(df.loc[needs_enrichment, "translationId"]) - set(mapping.index)
+    if missing_ids:
+        root_logger.warning(
+            f"{len(missing_ids)} translationId(s) not found in country mapping: "
+            f"{sorted(missing_ids)[:10]}{'...' if len(missing_ids) > 10 else ''}"
+        )
+
+    for idx in df.index[needs_enrichment]:
+        tid = df.at[idx, "translationId"]
+        if tid in mapping.index:
+            df.at[idx, "countryCode"] = mapping.at[tid, "countryCode"]
+            df.at[idx, "continentCode"] = mapping.at[tid, "continentCode"]
+
+    filled = needs_enrichment.sum() - df["countryCode"].isna().sum() - (df["countryCode"] == "").sum()
+    root_logger.info(f"Country enrichment: filled {filled} rows from {mapping_path.name}.")
+    return df
+
+
 def main() -> None:
 
     parser: argparse.ArgumentParser = argparse.ArgumentParser(
@@ -1357,6 +1398,10 @@ def main() -> None:
     # --- Load or Initialize Status ---
     status_path = metadata_folder / STATUS_FILENAME
     status_df = initialize_or_load_status(status_path, translations_csv)
+
+    # --- Enrich with country and continent data ---
+    assets_dir = Path(__file__).parent.parent / "assets"
+    status_df = enrich_with_country_data(status_df, assets_dir)
 
     # --- Handle --update-settings mode ---
     if args.update_settings:

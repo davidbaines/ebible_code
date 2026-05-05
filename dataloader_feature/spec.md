@@ -173,3 +173,134 @@ The existing guard `present = [c for c in METADATA_SOURCE_COLUMNS if c in df.col
 | `test_override_applied` | `RP` raw code is replaced by `PH` before continent lookup; result is `PH`/`AS` |
 | `test_override_missing_file_ok` | Script runs without error when overrides file is absent |
 | `test_override_unknown_after_override_warns` | Code not in overrides and not in continent map still triggers warning |
+
+---
+
+# Phase 2 Spec — Glottolog Language Family Data
+
+## Goal
+
+Produce `assets/glottolog_families.csv`, a committed reference file that maps every Glottolog language's ISO 639-3 code to its top-level family name and full ancestor-path classification. This file is a join asset for the Phase 3 dataloader; no pipeline columns are added to `ebible_status.csv` or `metadata.parquet`.
+
+## Deliverables
+
+| File | Type | Description |
+|---|---|---|
+| `assets/glottolog_families.csv` | Generated reference (committed) | languageCode → glottocode, family_name, classification |
+| `assets/macrolanguage_overrides.csv` | Static reference (committed) | Maps eBible macrolanguage codes to Glottolog lookup codes |
+| `assets/ATTRIBUTION.md` | Static reference (committed) | Credits for all data sources in `assets/` |
+| `ebible_code/get_glottolog_families.py` | New script | Downloads Glottolog data and writes `glottolog_families.csv` |
+| `tests/test_phase2.py` | New tests | Unit tests for all script logic |
+
+---
+
+## Data Sources
+
+### Glottolog 5.3
+
+URL: `https://cdstar.eva.mpg.de/bitstreams/EAEA0-608B-9919-A962-0/glottolog_languoid.csv.zip`
+
+Licence: CC BY 4.0. May be committed to git with attribution.
+
+Citation: Hammarström, Harald & Forkel, Robert & Haspelmath, Martin & Bank, Sebastian. 2024. *Glottolog 5.3*. Leipzig: Max Planck Institute for Evolutionary Anthropology. Available at https://glottolog.org
+
+The zip contains `languoid.csv`, a self-referential table (~27,000 rows). Relevant columns:
+
+| Column | Description |
+|---|---|
+| `id` | Glottocode (unique identifier for this languoid) |
+| `name` | Human-readable name |
+| `level` | `language` \| `dialect` \| `family` |
+| `iso639P3code` | ISO 639-3 code (non-empty only for language-level entries) |
+| `family_id` | Glottocode of top-level ancestor (empty for top-level families and isolates) |
+| `parent_id` | Glottocode of immediate parent (empty for root nodes) |
+
+### macrolanguage_overrides.csv
+
+Static file, manually maintained. Used only inside `get_glottolog_families.py` to redirect any eBible macrolanguage codes to their Glottolog-resolvable specific codes.
+
+| Column | Example | Notes |
+|---|---|---|
+| `ebible_language_code` | `ara` | Code as it appears in eBible's `languageCode` column |
+| `glottolog_lookup_code` | `arb` | ISO 639-3 code to use when looking up in Glottolog |
+| `notes` | `Arabic macrolanguage → Standard Arabic` | Human-readable reason |
+
+Note: eBible already uses specific ISO 639-3 codes for Arabic and Chinese variants (e.g. `arq`, `arz`, `cmn`), so this file may start empty. It is provided as a safety valve.
+
+---
+
+## New Script: `ebible_code/get_glottolog_families.py`
+
+### Inputs
+- Glottolog 5.3 `languoid.csv.zip` (downloaded from URL above)
+- `assets/macrolanguage_overrides.csv` (optional; missing file is not an error)
+
+### Algorithm
+
+1. HTTP GET the Glottolog CDStar URL; open the zip in-memory (no temp file written).
+2. Read `languoid.csv` with `dtype=str, keep_default_na=False` — prevents `"NA"` (and other short strings) being silently coerced to NaN.
+3. Load `assets/macrolanguage_overrides.csv` if present; build dict `{ebible_language_code: glottolog_lookup_code}`. Return `{}` if file absent.
+4. Build two indexes from the DataFrame:
+   - `id_to_row`: `{glottocode: Series}` over all rows
+   - `iso_to_row`: `{iso639P3code: Series}` over language-level rows with non-empty ISO code (first occurrence wins on duplicates)
+5. For each language-level row with a non-empty `iso639P3code`:
+   a. If the ISO code is in the macrolanguage overrides dict, use the override code for lookup (emit a warning to stderr; write the original code as `languageCode` in the output).
+   b. Trace the ancestor chain upward via `parent_id` until a row with no `parent_id` or a `parent_id` not in `id_to_row` is reached.
+   c. Compute `family_name`:
+      - If the language itself has an empty `family_id`: it is a top-level isolate → `family_name = "Isolate"`.
+      - Otherwise: look up `family_id` in `id_to_row` → use that row's `name`.
+   d. Compute `classification`: names of all nodes in the ancestor chain from root down to (and including) the language itself, joined with `/`.
+      - For isolates: single component (just the language name).
+6. Collect one row per ISO code (first occurrence wins).
+7. Write `assets/glottolog_families.csv`.
+
+### Output schema
+
+| Column | Example | Constraint |
+|---|---|---|
+| `languageCode` | `eng` | ISO 639-3 code, lowercase; join key into eBible `languageCode` |
+| `glottocode` | `stan1293` | Glottolog identifier for this language |
+| `family_name` | `Indo-European` | Non-empty string; `"Isolate"` for isolates |
+| `classification` | `Indo-European/Germanic/West Germanic/High German/German` | Slash-separated path from root to language |
+
+One row per ISO 639-3 code. No duplicate `languageCode` values.
+
+### What is NOT changed
+
+- `ebible.py` — no new columns added to `ebible_status.csv`
+- `corpus_to_parquet.py` — no new columns added to `metadata.parquet`
+- `ebible_status.csv` — Glottolog data is a separate join-time asset, not pipeline state
+
+---
+
+## Verification
+
+### Script output (`get_glottolog_families.py`)
+
+1. `assets/glottolog_families.csv` is created with exactly four columns: `languageCode`, `glottocode`, `family_name`, `classification`.
+2. Row count ≥ 7,500 (Glottolog 5.3 has 7,859 language-level entries with ISO codes).
+3. No duplicate `languageCode` values.
+4. All `languageCode` values match `^[a-z]{3}$`.
+5. All `family_name` values are non-empty strings.
+6. All `classification` values are non-empty strings.
+7. Spot-check: `eng` → `glottocode = stan1293`, `family_name = Indo-European`, `classification` starts with `Indo-European` and contains `Germanic`.
+8. Spot-check: `eus` (Basque) → `family_name = Isolate`.
+9. Spot-check: `fra` (French) → `family_name = Indo-European`, `classification` contains `Romance`.
+10. Spot-check: `arq` (Algerian Arabic) → `family_name = Afro-Asiatic`.
+11. No warning fired for `arq` (eBible uses the specific code, not the macrolanguage `ara`).
+
+### Tests (`tests/test_phase2.py`)
+
+| Test | What it checks |
+|---|---|
+| `test_family_name_extracted` | Language with known family_id → correct family_name looked up |
+| `test_classification_path` | Full ancestor chain traced correctly; slash-separated path matches expected |
+| `test_isolate_family_name` | Language with empty family_id → `family_name = "Isolate"` |
+| `test_isolate_classification_single_component` | Isolate classification has no `/` separator |
+| `test_no_duplicate_language_codes` | Output DataFrame has no duplicate `languageCode` |
+| `test_output_csv_columns` | Output has exactly four expected columns in correct order |
+| `test_macrolanguage_override_applied` | Override dict redirects lookup; original code used as `languageCode` in output |
+| `test_macrolanguage_override_missing_file_ok` | Missing overrides file → `{}` returned, no exception |
+| `test_missing_iso_code_skipped` | Rows with empty `iso639P3code` do not appear in output |
+| `test_first_occurrence_wins_on_duplicate_iso` | When two Glottolog rows share an ISO code, first row's data is kept |
+| `test_keep_default_na_false` | ISO code `"NA"` is not parsed as NaN and survives into output |

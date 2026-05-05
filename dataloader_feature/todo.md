@@ -61,3 +61,54 @@
 - [x] Commit updated `generate_language_country_continent.py` (with override logic)
 - [x] Commit updated `tests/test_phase1.py` (with override tests)
 - [x] Re-commit `assets/language_country_continent.csv` (regenerated with `RP` fixed)
+
+---
+
+# Phase 2 Todo — Glottolog Language Family Data
+
+## Step 1 — Create `assets/ATTRIBUTION.md`
+
+- [x] Write attribution for Glottolog 5.3 (CC BY 4.0, full Hammarström et al. citation, URL, version)
+- [x] Write attribution for country-continent Gist (Steve Withington)
+- [x] Write attribution for eBible.org Scriptures table
+- [x] Commit `assets/ATTRIBUTION.md`
+
+## Step 2 — Create `assets/macrolanguage_overrides.csv`
+
+- [x] Create file with header: `ebible_language_code,glottolog_lookup_code,notes`
+- [x] Check eBible `languageCode` values — eBible already uses specific ISO 639-3 codes; no macrolanguage codes found
+- [x] File created with header only (no data rows needed)
+- [x] Commit `assets/macrolanguage_overrides.csv`
+
+## Step 3 — Write `ebible_code/get_glottolog_families.py`
+
+- [x] Download Glottolog 5.3 zip and inspect `languoid.csv` structure
+- [x] Implement `load_macrolanguage_overrides(path)` — returns `{}` if file absent, else `{ebible_code: glottolog_code}`
+- [x] Implement `load_languoids(zip_url)` — downloads zip, reads `languoid.csv` with `keep_default_na=False, dtype=str`
+- [x] Implement `build_family_records(df, overrides)` — traces ancestor paths for all language-level rows with ISO codes
+- [x] Handle isolates: `family_id` empty → `family_name = "Isolate"`, `classification` = language name only
+- [x] Handle first-occurrence-wins for duplicate ISO codes
+- [x] Implement `write_glottolog_families(records, output_path)` — writes CSV with four columns
+- [x] Wire up `main()` calling all of the above
+
+## Step 4 — Run and verify
+
+- [x] Run `poetry run python ebible_code/get_glottolog_families.py`
+- [x] Verify: row count = 7,859 (≥ 7,500)
+- [x] Verify: no duplicate `languageCode` values
+- [x] Verify spot-checks: `eng` (Indo-European/Germanic/...), `eus` (Isolate), `fra` (Indo-European/.../Romance/...), `arq` (Afro-Asiatic)
+- [x] Verify: no warning fires for `arq` (eBible uses specific code, not macrolanguage `ara`)
+- [x] Commit `assets/glottolog_families.csv`
+
+## Step 5 — Tests
+
+- [x] Write `tests/test_phase2.py` with all tests listed in spec (15 tests)
+- [x] All 15 tests pass: `poetry run pytest tests/test_phase2.py`
+- [x] No regressions: all 42 tests pass across test_phase1.py, test_phase2.py, test_clean_range_markers.py
+
+## Step 6 — Commit
+
+- [x] Commit `ebible_code/get_glottolog_families.py`
+- [x] Commit `assets/macrolanguage_overrides.csv`
+- [x] Commit `assets/ATTRIBUTION.md`
+- [x] Commit `tests/test_phase2.py`

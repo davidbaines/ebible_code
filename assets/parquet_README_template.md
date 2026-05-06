@@ -74,16 +74,78 @@ Each row corresponds to one verse reference from the standard 41,899-verse refer
 
 ## Loading the Dataset
 
+The dataset ships with `dataloader.py`, a CLI utility for filtering, loading, and splitting the corpus without writing any Python.
+
+### Installation
+
+```bash
+pip install pandas pyarrow huggingface_hub
+```
+
+### Basic usage
+
+**List matching translations (no output files written):**
+
+```bash
+# All redistributable translations in Europe or Asia
+python dataloader.py filter \
+  --filter Redistributable True \
+  --filter continentCode in EU AS
+
+# Germanic-family languages (requires glottolog_families.csv)
+python dataloader.py filter \
+  --custom_filter assets/glottolog_families.csv --join-on languageCode \
+  --filter family_name contains Germanic
+```
+
+**Load verse text and metadata to CSV:**
+
+```bash
+python dataloader.py load \
+  --filter Redistributable True \
+  --filter continentCode EU \
+  --output eu_verses.csv \
+  --metadata-columns translationId languageCode countryCode Redistributable
+```
+
+This writes two files: `eu_verses.csv` (one row per verse, one column per translation) and `eu_verses_metadata.csv` (one row per translation).
+
+**Write train/test/val splits:**
+
+```bash
+python dataloader.py split \
+  --filter Redistributable True \
+  --splits my_splits.csv \
+  --output-dir splits/
+```
+
+`splits.csv` columns: `translationId`, `book`, `chapter`, `verse`, `split`. Omit trailing columns to assign larger scopes — a row with only `translationId` and `split` assigns the entire Bible to that split.
+
+**Load against a local copy of the dataset:**
+
+```bash
+python dataloader.py filter --repo /path/to/local/dataset --filter languageCode eng
+```
+
+### Filter operators
+
+| Operator | Example | Meaning |
+|---|---|---|
+| *(default)* | `--filter Redistributable True` | Exact match |
+| `contains` | `--filter family_name contains Germanic` | Substring match |
+| `not` | `--filter translationId not engKJV` | Not equal |
+| `in` | `--filter continentCode in EU AS AF` | One of a list |
+
+Multiple `--filter` flags are AND-combined.
+
+### Programmatic use
+
 ```python
 from datasets import load_dataset
 
-ds = load_dataset("your-org/ebible-parallel", split="train")
-
-# Access a specific translation
-kjv = ds["eng-engKJV"]
-
-# Filter to New Testament
-nt_start = ds.filter(lambda row: row["vref"].startswith("MAT"))
+# Load the full dataset directly — no dataloader.py needed
+ds = load_dataset("DavidCBaines/ebible_corpus", split="train")
+df = ds.to_pandas()
 ```
 
 ## Licence Breakdown

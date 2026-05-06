@@ -304,3 +304,231 @@ One row per ISO 639-3 code. No duplicate `languageCode` values.
 | `test_missing_iso_code_skipped` | Rows with empty `iso639P3code` do not appear in output |
 | `test_first_occurrence_wins_on_duplicate_iso` | When two Glottolog rows share an ISO code, first row's data is kept |
 | `test_keep_default_na_false` | ISO code `"NA"` is not parsed as NaN and survives into output |
+
+---
+
+# Phase 3 Spec — Dataloader Script
+
+## Goal
+
+A user-facing CLI utility (`dataloader.py`) that reads eBible corpus parquet files, applies flexible filtering and optional train/test/val splits, and writes the results in formats suited for ML use. The script lives at the top level of the HuggingFace dataset repo (`DavidCBaines/ebible_corpus`) so users who download the dataset can run it locally alongside the data.
+
+## Deliverables
+
+| File | Type | Description |
+|---|---|---|
+| `ebible_code/dataloader.py` | New script | CLI utility; deployed to HuggingFace repo top level |
+| `tests/test_phase3.py` | New tests | Unit tests for filter, load, and split logic |
+
+---
+
+## Data Model
+
+Two source parquet files (co-located with `dataloader.py` in the HuggingFace repo, or loaded remotely via `datasets.load_dataset()`):
+
+| File | Shape | Notes |
+|---|---|---|
+| `main.parquet` | 41,899 rows × (1 `vref` + N translation columns) | Wide/parallel format; empty string for untranslated verses |
+| `metadata.parquet` | N rows × M columns | One row per translation; includes `translationId`, `languageCode`, `countryCode`, `continentCode`, `Redistributable`, etc. |
+
+---
+
+## Subcommand Architecture
+
+Three subcommands share a common parent parser that carries all filtering arguments. The subcommands build on each other: `filter` inspects, `load` produces output files, `split` also applies train/test/val partitioning.
+
+```
+python dataloader.py filter [filter-args]
+python dataloader.py load   [filter-args] [load-args]
+python dataloader.py split  [filter-args] [load-args] [split-args]
+```
+
+---
+
+## Shared Filter Arguments (parent parser)
+
+| Argument | Default | Description |
+|---|---|---|
+| `--repo REPO` | `DavidCBaines/ebible_corpus` | Local directory path or HuggingFace dataset ID |
+| `--filter COLUMN [OPERATOR] VALUE ...` | — | Filter on any metadata column; repeatable; AND-combined |
+| `--custom_filter FILE` | — | Join a user-supplied CSV onto metadata before filtering; repeatable |
+| `--join-on COLUMN` | — | Join key for the preceding `--custom_filter`; scoped per file |
+
+### Filter operators
+
+| Operator | Meaning | Example |
+|---|---|---|
+| `is` | Exact match (default if operator omitted) | `--filter Redistributable True` |
+| `contains` | Substring match | `--filter classification contains Germanic` |
+| `not` | Not equal | `--filter translationId not engKJV` |
+| `in` | One of a list | `--filter continentCode in EU AS` |
+
+Multiple `--filter` flags are AND-combined. Unknown column names raise a clear error. `--join-on` column absent from the custom CSV raises a clear error.
+
+---
+
+## `filter` Subcommand
+
+Prints matching translationIds and a one-line summary count. Writes no output files.
+
+```bash
+python dataloader.py filter \
+  --filter Redistributable True \
+  --filter continentCode EU
+```
+
+Output: sorted list of matching translationIds followed by `N translations matched.`
+
+---
+
+## `load` Subcommand
+
+Loads verse text for matched translations and writes two output files: a text table and (optionally) a metadata table.
+
+### Additional arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `--output FILE` | stdout | Output path for text table |
+| `--output-format csv\|parquet\|huggingface\|pandas` | `csv` | Output format |
+| `--metadata-output FILE` | Derived from `--output` | Path for metadata table (e.g. `out.csv` → `out_metadata.csv`) |
+| `--no-metadata` | off | Suppress metadata table |
+| `--metadata-columns COL [COL ...]` | see below | Columns in metadata table |
+
+Default `--metadata-columns`: `translationId languageCode countryCode continentCode Redistributable`
+
+### Output shape
+
+**Text table** — one row per vref, one column per selected translation:
+
+| vref | engBBE | fra | deu |
+|---|---|---|---|
+| GEN 1:1 | In the beginning... | Au commencement... | Im Anfang... |
+| GEN 1:2 | … | … | |
+
+- Column headers are `translationId` values.
+- All columns the same length (41,899 rows).
+- Missing/untranslated verses are empty strings, not NaN.
+
+**Metadata table** — one row per selected translation:
+
+| translationId | languageCode | countryCode | continentCode | Redistributable |
+|---|---|---|---|---|
+| engBBE | eng | GB | EU | True |
+| fra | fra | FR | EU | True |
+
+- `translationId` is the join key matching text table column names.
+- Columns controlled by `--metadata-columns`.
+
+---
+
+## `split` Subcommand
+
+Applies user-defined train/test/val splits. Inherits all `load` arguments, plus:
+
+| Argument | Description |
+|---|---|
+| `--splits FILE` | Path to `splits.csv` |
+| `--output-dir DIR` | Directory for split output files |
+
+### Splits CSV format
+
+Columns: `translationId`, `book`, `chapter`, `verse`, `split`
+
+### Omission semantics
+
+| Columns present | Scope |
+|---|---|
+| `translationId` only | Entire Bible for that translation |
+| `translationId` + `book` | Whole book |
+| `translationId` + `book` + `chapter` | Whole chapter |
+| All four | Specific verse |
+
+### Split output files
+
+For `--output-dir out/` with splits `train`, `test`, `val`:
+
+```
+out/train.csv         out/train_metadata.csv
+out/test.csv          out/test_metadata.csv
+out/val.csv           out/val_metadata.csv
+```
+
+All split text tables have the same column set and the same row count; verses not in a given split are empty strings (alignment preserved).
+
+### Filtering and splits interaction
+
+1. Filtering runs **first**; only matched translations are loaded.
+2. Splits are applied to the filtered set.
+3. Summary printed to stderr:
+   - Number of translations matched by filters.
+   - For each translation: number of non-empty verses in output.
+   - Translations named in `splits.csv` but excluded by filters (with reason).
+   - Translations that matched filters but have zero non-empty verses.
+
+---
+
+## Loading Strategy
+
+When `--repo` contains `/` (e.g. `DavidCBaines/ebible_corpus`): load via `datasets.load_dataset(repo)`.
+
+When `--repo` is a local path: read `main.parquet` and `metadata.parquet` directly from that directory.
+
+When running from the HuggingFace repo directory with no `--repo` flag: defaults to loading from the current directory.
+
+---
+
+## HuggingFace Dataset Output (`--output-format huggingface`)
+
+- No `--splits`: returns a flat `Dataset`.
+- With `--splits`: returns a `DatasetDict` with split names as keys.
+
+---
+
+## Verification
+
+1. `filter` with `--filter Redistributable True` prints only redistributable translationIds.
+2. `filter` with `--filter classification contains Germanic` (via `--custom_filter assets/glottolog_families.csv --join-on languageCode`) prints only Germanic-family translations.
+3. `filter` with `--filter continentCode in EU AS` returns correct subset.
+4. Multiple `--filter` flags are AND-combined (intersection, not union).
+5. Unknown column in `--filter` raises a clear error message (not a Python traceback).
+6. `--join-on COLUMN` pointing to absent column raises a clear error.
+7. `load` text table has 41,899 rows and N+1 columns (vref + translations).
+8. `load` text table has empty strings (not NaN/None) for untranslated verses.
+9. `load` metadata table has N rows and the columns specified by `--metadata-columns`.
+10. `--no-metadata` produces text table only.
+11. `--metadata-columns translationId languageCode` produces metadata with exactly those two columns.
+12. `split` output files all have 41,899 rows; verses not in a split are empty strings.
+13. Omission: a splits row with only `translationId` assigns the full Bible to that split.
+14. Omission: a row with `translationId + book` assigns the whole book.
+15. Filtering runs before splits: a translation excluded by `--filter` is absent from all split files, and named in the summary.
+16. `--output-format parquet` writes valid parquet that can be read back with pandas.
+17. `--output-format huggingface` returns `Dataset` (no splits) or `DatasetDict` (with splits).
+
+---
+
+## Tests (`tests/test_phase3.py`)
+
+| Test | What it checks |
+|---|---|
+| `test_filter_exact` | `is` operator returns exact matches only |
+| `test_filter_contains` | `contains` operator returns substring matches |
+| `test_filter_not` | `not` operator excludes the specified value |
+| `test_filter_in` | `in` operator matches any of the listed values |
+| `test_filter_and_combined` | Two `--filter` flags → AND of both conditions |
+| `test_filter_unknown_column_raises` | Clear error on column not in metadata |
+| `test_custom_filter_join` | `--custom_filter FILE --join-on COLUMN` works correctly |
+| `test_custom_filter_bad_column_raises` | Clear error when join column absent from CSV |
+| `test_load_text_table_shape` | Text table has correct row and column counts |
+| `test_load_empty_strings_not_nan` | Missing verses are `""`, not NaN |
+| `test_load_vref_first_column` | First column of text table is `vref` |
+| `test_metadata_table_shape` | Metadata table has N rows × M columns |
+| `test_metadata_columns_flag` | `--metadata-columns` controls output columns exactly |
+| `test_no_metadata_flag` | `--no-metadata` suppresses metadata output |
+| `test_split_assigns_correctly` | Verses go to the split named in splits.csv |
+| `test_split_omission_translation_only` | Row with only `translationId` → whole Bible in that split |
+| `test_split_omission_book_only` | Row with `translationId + book` → whole book |
+| `test_split_filter_first` | Translation excluded by filter absent from all split files |
+| `test_split_summary_warns_filtered` | Summary mentions translations removed by filter |
+| `test_split_alignment_preserved` | All split text tables same row count; absent verses are `""` |
+| `test_output_format_parquet` | Parquet output round-trips correctly through pandas |

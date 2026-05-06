@@ -112,21 +112,25 @@ ____________________________________
 
 7. **Licence and attribution**: Glottolog 5.3 is CC BY 4.0. The generated `assets/glottolog_families.csv` may be committed to git with proper attribution in `assets/ATTRIBUTION.md`.
 
-## Open questions — Phase 3
-
-*(To be resolved before work on Phase 3 begins.)*
+## Settled decisions — Phase 3
 
 ### Phase 3 — Dataloader script
 
-1. **Script location**: Where does `dataloader.py` live? `ebible_code/`? Or a separate top-level file since it is user-facing?
+1. **Script location**: `ebible_code/dataloader.py` in this dev repo; deployed as top-level `dataloader.py` in the HuggingFace dataset repo (`DavidCBaines/ebible_corpus`), so users who download the dataset can run it directly alongside the data files.
 
-2. **HuggingFace source repo**: What is the dataset repo identifier on HuggingFace that the dataloader will pull from? (e.g. `org/ebible-corpus`)
+2. **HuggingFace dataset repo**: `DavidCBaines/ebible_corpus`. This is the default value for `--repo`. Note: HuggingFace dataset loading scripts (the `DatasetBuilder` subclass mechanism) were deprecated and removed in `datasets` v4.0.0 (July 2025). The parquet-native approach is now standard; `dataloader.py` is a utility script documented in the dataset README.
 
-3. **Splits design — omission semantics**: In `splits.csv`, when a row has `translationId` only (no `book`/`chapter`/`verse`), does the entire Bible for that translation go into that split? And when a row has `translationId + book` but no `chapter`/`verse`, the whole book?
+3. **Splits omission semantics**: `translationId` only → full Bible; + `book` → whole book; + `book + chapter` → whole chapter; + all four columns → specific verse. All output columns the same length; verses not in a split are empty strings (vref alignment preserved).
 
-4. **Splits + filtering interaction**: If a user filters to `--continent EU` and also provides a `splits.csv` that references `engKJV` (which is in EU), do the splits apply only to the filtered set, or does filtering happen first and the splits file is then validated against what survived?
+4. **Splits + filtering interaction**: Filtering runs first; splits are applied only to the filtered set. Translations named in `splits.csv` but excluded by filters are listed in the summary. Translations that survived filters but have zero non-empty verses are also noted.
 
-5. **Output shape**: When `--output huggingface`, should the result be a `DatasetDict` with keys `train`, `test`, `val` (when splits are provided), or a flat `Dataset` when no splits are given?
+5. **Output shape**: Wide/parallel by default — one row per vref (41,899 rows), one column per selected translation (translationId as column header), first column = `vref`. Two output files: text table + metadata table. `--no-metadata` suppresses the metadata table.
+
+6. **Metadata flag**: `--metadata-columns COLUMN [COLUMN ...]` controls which columns appear in the metadata table. Default: `translationId languageCode countryCode continentCode Redistributable`.
+
+7. **HuggingFace Dataset output**: `--output-format huggingface` returns a flat `Dataset` (no splits) or a `DatasetDict` with split names as keys (with `--splits`).
+
+8. **Subcommand structure**: `filter` (inspect), `load` (produce output files), `split` (produce split output files). Shared parent parser carries all filter arguments across all three subcommands.
 
 ____________________________________
 
@@ -218,3 +222,57 @@ The `--join-on COLUMN` argument is scoped to its `--custom_filter` file: each `-
 - Glottolog 5.3 (CC BY 4.0) — Hammarström et al. 2024
 - Country-continent mapping Gist — Steve Withington (public domain / open)
 - eBible.org translations table — sourced per individual translation licences
+
+## Design summary — Phase 3: dataloader script
+
+**Goal**: A CLI utility (`dataloader.py`) that reads eBible corpus parquet files, applies flexible filtering, and writes parallel text + metadata output suitable for ML use. Deployed as a top-level file in the HuggingFace dataset repo so users can run it alongside the downloaded data.
+
+### HuggingFace context
+
+The HuggingFace dataset loading script mechanism (`DatasetBuilder` subclass, invoked by `load_dataset()`) was deprecated and removed in `datasets` v4.0.0 (July 2025). The parquet-native approach is now standard. `dataloader.py` is a utility script documented in the dataset README, not a `load_dataset()` hook. Parquet files remain directly usable via `datasets.load_dataset("DavidCBaines/ebible_corpus")` without any custom script.
+
+### Subcommands
+
+```bash
+python dataloader.py filter [filter-args]           # inspect: print matching translationIds
+python dataloader.py load   [filter-args] [load-args]    # produce output files
+python dataloader.py split  [filter-args] [load-args] [split-args]  # produce split files
+```
+
+### Two output files (from `load` and `split`)
+
+**Text table** — one row per vref, one column per selected translation:
+
+```
+vref, engBBE, fra, deu
+GEN 1:1, In the beginning..., Au commencement..., Im Anfang...
+GEN 1:2, ...
+```
+
+**Metadata table** — one row per selected translation:
+
+```
+translationId, languageCode, countryCode, continentCode, Redistributable
+engBBE, eng, GB, EU, True
+fra, fra, FR, EU, True
+```
+
+`translationId` is the join key between the two files (column headers in text table ↔ `translationId` column in metadata table). `vref` is only in the text table.
+
+### Key flags
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--repo` | `DavidCBaines/ebible_corpus` | Local path or HuggingFace dataset ID |
+| `--filter COLUMN [OPERATOR] VALUE ...` | — | Operators: `is`, `contains`, `not`, `in`; repeatable; AND-combined |
+| `--custom_filter FILE` | — | Join user CSV; paired with `--join-on COLUMN` |
+| `--output FILE` | stdout | Text table output path |
+| `--output-format` | `csv` | `csv`, `parquet`, `huggingface`, `pandas` |
+| `--no-metadata` | off | Suppress metadata table |
+| `--metadata-columns COL ...` | 5 defaults | Columns in metadata table |
+| `--splits FILE` | — | splits.csv for train/test/val partitioning |
+| `--output-dir DIR` | — | Directory for split output files |
+
+### Splits semantics
+
+All output columns are the same length; verses not in a split are empty strings. Filter runs before splits. Summary printed to stderr after every run.

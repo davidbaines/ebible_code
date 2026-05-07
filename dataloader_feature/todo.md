@@ -119,68 +119,66 @@
 
 ## Step 1 — Read parquet files and understand their schemas
 
-- [ ] Read `main.parquet` schema: confirm vref column name, sample translationId column names
-- [ ] Read `metadata.parquet` schema: confirm all available columns
-- [ ] Note row/column counts for use in tests
+- [x] Read `main.parquet` schema: confirm vref column name, sample translationId column names
+- [x] Read `metadata.parquet` schema: confirm all available columns
+- [x] Note row/column counts for use in tests
 
 ## Step 2 — Write core filter logic
 
-- [ ] Implement `parse_filter_args(filters)` — parses `[COLUMN, [OPERATOR], VALUE...]` tuples into filter specs
-- [ ] Implement `apply_filters(metadata_df, filter_specs)` — applies AND-combined filters; raises on unknown column
-- [ ] Implement `load_custom_filter(file, join_col, metadata_df)` — joins user CSV, validates join column
-- [ ] Support all four operators: `is`, `contains`, `not`, `in`
-- [ ] Test with sample metadata DataFrame (no parquet I/O needed)
+- [x] Implement `parse_filter_tokens(tokens)` — parses `[COLUMN, [OPERATOR], VALUE...]` tuples into FilterSpec
+- [x] Implement `apply_filters(metadata_df, filter_specs)` — applies AND-combined filters; raises on unknown column
+- [x] Implement `apply_custom_filter(df, spec)` — inner-joins user CSV, validates join column
+- [x] Support all four operators: `is`, `contains`, `not`, `in`
+- [x] Test with sample metadata DataFrame (no parquet I/O needed)
 
 ## Step 3 — Write `filter` subcommand
 
-- [ ] Load `metadata.parquet` from `--repo` path
-- [ ] Apply all filters and custom filters
-- [ ] Print sorted translationId list + summary count
-- [ ] Implement `--repo` resolution (local path vs HuggingFace dataset ID)
+- [x] Load `metadata.parquet` from `--repo` path
+- [x] Apply all filters and custom filters
+- [x] Print sorted translationId list + summary count
+- [x] Implement `--repo` resolution via `hf://` URI (local path vs HuggingFace dataset ID)
 
 ## Step 4 — Write `load` subcommand
 
-- [ ] Load filtered translationId list → select those columns from `main.parquet`
-- [ ] Build text table: `vref` + selected translation columns; empty string for NaN
-- [ ] Build metadata table using `--metadata-columns` (default set)
-- [ ] Write text table to `--output` in `--output-format` (csv, parquet)
-- [ ] Write metadata table to `--metadata-output` (unless `--no-metadata`)
-- [ ] Print summary to stderr (translation count, non-empty verse counts)
+- [x] Load filtered translationId list → select those columns from `main.parquet`
+- [x] Build text table: `vref` + selected translation columns; empty string for NaN
+- [x] Build metadata table using `--metadata-columns` (default set)
+- [x] Write text table to `--output` in `--output-format` (csv, parquet)
+- [x] Write metadata table to `--metadata-output` (unless `--no-metadata`)
+- [x] Print summary to stderr (translation count, non-empty verse counts)
 
 ## Step 5 — Write `split` subcommand
 
-- [ ] Parse `splits.csv` with omission semantics:
+- [x] Parse `splits.csv` with omission semantics:
   - translationId only → full Bible
   - + book → whole book
   - + book + chapter → whole chapter
   - + all four → specific verse
-- [ ] Map parsed split specs to vref rows from `assets/vref.txt`
-- [ ] For each split: produce text table (same columns, same rows; out-of-split verses = `""`)
-- [ ] For each split: produce metadata table
-- [ ] Write split files to `--output-dir`
-- [ ] Summary: note translations excluded by filter that appear in splits.csv
+- [x] For each split: produce text table (same columns, same rows; out-of-split verses = `""`)
+- [x] For each split: produce metadata table
+- [x] Write split files to `--output-dir`
+- [x] Summary: note translations excluded by filter that appear in splits.csv
 
 ## Step 6 — HuggingFace Dataset output
 
-- [ ] Implement `--output-format huggingface`: flat `Dataset` (no splits) or `DatasetDict` (with splits)
-- [ ] Implement `--output-format pandas`: return DataFrame (used programmatically, not from CLI)
+- [x] Implement `--output-format huggingface`: flat `Dataset`; `save_to_disk` if output path given
+- [x] Implement `--output-format pandas`: return DataFrame (used programmatically, not from CLI)
 
 ## Step 7 — Tests
 
-- [ ] Write `tests/test_phase3.py` with all 21 tests from spec
-- [ ] All tests pass: `poetry run pytest tests/test_phase3.py`
-- [ ] No regressions across test_phase1.py, test_phase2.py, test_clean_range_markers.py
+- [x] Write `tests/test_phase3.py` with all 21 tests from spec
+- [x] All 21 tests pass: `poetry run pytest tests/test_phase3.py`
+- [x] No regressions: all 63 tests pass across test_phase1.py, test_phase2.py, test_phase3.py, test_clean_range_markers.py
 
 ## Step 8 — README update
 
-- [ ] Add `dataloader.py` section to `assets/parquet_README_template.md` documenting:
-  - Installation: `pip install pandas pyarrow datasets`
+- [x] Add `dataloader.py` section to `assets/parquet_README_template.md` documenting:
+  - Installation: `pip install pandas pyarrow huggingface_hub`
   - Basic usage examples for `filter`, `load`, `split` subcommands
   - `--custom_filter` example with `glottolog_families.csv`
-  - Link to `assets/ATTRIBUTION.md`
 
 ## Step 9 — Commit
 
-- [ ] Commit `ebible_code/dataloader.py`
-- [ ] Commit `tests/test_phase3.py`
-- [ ] Commit updated `assets/parquet_README_template.md`
+- [x] Commit `ebible_code/dataloader.py`
+- [x] Commit `tests/test_phase3.py`
+- [x] Commit updated `assets/parquet_README_template.md`

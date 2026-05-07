@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 SCRIPTURES_URL = "https://ebible.org/Scriptures/"
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 CONTINENT_CSV = ASSETS_DIR / "country_continent.csv"
+OVERRIDES_CSV = ASSETS_DIR / "country_code_overrides.csv"
 OUTPUT_CSV = ASSETS_DIR / "language_country_continent.csv"
 
 
@@ -85,6 +86,38 @@ def load_continent_map(csv_path: Path) -> dict[str, str]:
     return result
 
 
+def load_overrides(csv_path: Path) -> dict[tuple[str, str], str]:
+    """Return dict mapping (translationId, ebible_country_code) -> country_code.
+
+    Returns an empty dict if the file does not exist (not an error).
+    keep_default_na=False prevents 'NA' being parsed as NaN.
+    """
+    if not csv_path.exists():
+        return {}
+    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
+    result = {}
+    for _, row in df.iterrows():
+        tid = str(row["translationId"]).strip()
+        raw = str(row["ebible_country_code"]).strip().upper()
+        iso = str(row["country_code"]).strip().upper()
+        if tid and raw and iso:
+            result[(tid, raw)] = iso
+    return result
+
+
+def apply_overrides(
+    pairs: list[tuple[str, str]],
+    overrides: dict[tuple[str, str], str],
+) -> list[tuple[str, str]]:
+    """Replace country codes that have a (translationId, ebible_country_code) override entry."""
+    if not overrides:
+        return pairs
+    return [
+        (tid, overrides.get((tid, code), code))
+        for tid, code in pairs
+    ]
+
+
 def build_mapping(
     pairs: list[tuple[str, str]],
     continent_map: dict[str, str],
@@ -121,6 +154,12 @@ def main() -> None:
 
     print(f"Fetching {SCRIPTURES_URL} ...", file=sys.stderr)
     pairs = fetch_scriptures_table(SCRIPTURES_URL)
+
+    overrides = load_overrides(OVERRIDES_CSV)
+    if overrides:
+        summary = ", ".join(f"{tid}:{raw}->{iso}" for (tid, raw), iso in overrides.items())
+        print(f"Applying {len(overrides)} country code override(s): {summary}", file=sys.stderr)
+    pairs = apply_overrides(pairs, overrides)
 
     continent_map = load_continent_map(CONTINENT_CSV)
     df = build_mapping(pairs, continent_map)

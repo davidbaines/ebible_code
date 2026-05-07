@@ -1,0 +1,175 @@
+---                                                                                                                                                                                                           The problem with a fixed "subfamily" level
+                                                                                                                                                                                                                Glottolog's tree is very deep and has different depths for different families:
+
+  ┌────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │    Language    │                                    Path to top-level family                                    │
+  ├────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ English (eng)  │ Indo-European → Classical IE → Germanic → NW Germanic → W Germanic → ... → English (11 levels) │
+  ├────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ French (fra)   │ Indo-European → Classical IE → Italic → ... → Romance → ... → French (16 levels)               │
+  ├────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Swahili (swh)  │ Atlantic-Congo → Volta-Congo → Benue-Congo → ... → Narrow Bantu → ... → Swahili (13 levels)    │
+  ├────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Japanese (jpn) │ Japonic → Japanesic → Japan-Taiwan Japanese → Japanese (4 levels)                              │
+  └────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  "Germanic" sits at depth 3 below Indo-European. "Romance" sits at depth 7. "Narrow Bantu" sits at depth 6 below Atlantic-Congo. There is no single depth that consistently gives the traditional, intuitive
+  subfamily groupings across families.
+
+  Also: zho (Mandarin) and ara (Arabic) are ISO macrolanguage codes — Glottolog uses the individual language codes instead, so those ISO codes have no direct row in the data.
+
+  ---
+  Revised recommendation for the CSV
+
+  Drop subfamily_name (it can't be defined consistently), and instead store:
+
+  ┌────────────────┬────────────────────────────────────────────────────┬────────────────────────────────────────────┐
+  │     Column     │                      Example                       │                   Notes                    │
+  ├────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ languageCode   │ eng                                                │ ISO 639-3, join key                        │
+  ├────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ glottocode     │ stan1293                                           │ Glottolog identifier                       │
+  ├────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ family_name    │ Indo-European                                      │ Top-level family — consistent and reliable │
+  ├────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ glottocode     │ stan1293                                           │ Glottolog identifier                       │
+  ├────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ family_name    │ Indo-European                                      │ Top-level family — consistent and reliable │
+  ├────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ classification │ Indo-European/Classical Indo-European/Germanic/... │ Full ancestor path, slash-separated        │
+  └────────────────┴────────────────────────────────────────────────────┴────────────────────────────────────────────┘
+
+  │ family_name    │ Indo-European                                      │ Top-level family — consistent and reliable │
+  ├────────────────┼────────────────────────────────────────────────────┼────────────────────────────────────────────┤
+  │ classification │ Indo-European/Classical Indo-European/Germanic/... │ Full ancestor path, slash-separated        │
+  └────────────────┴────────────────────────────────────────────────────┴────────────────────────────────────────────┘
+
+  │ classification │ Indo-European/Classical Indo-European/Germanic/... │ Full ancestor path, slash-separated        │
+  └────────────────┴────────────────────────────────────────────────────┴────────────────────────────────────────────┘
+
+  With classification as a string column, a user can filter by any level in the hierarchy by doing a substring match: --filter-contains classification Germanic would select all Germanic languages regardless
+   of their depth in the tree. This is more powerful and more honest than pretending "level 2" always means the same thing.
+  This requires the dataloader's --filter to support a contains mode alongside exact matching — worth building, and it's generally useful beyond just Glottolog.
+
+
+  1. Does this revised approach — family_name + classification (full path), no subfamily_name — work for the filtering you have in mind? For example, selecting "all Germanic languages" would be
+  --filter-contains classification Germanic; selecting "all Indo-European languages" would be --filter family_name "Indo-European".
+  2. Macrolanguage codes — zho (Chinese) and ara (Arabic) have no direct row in Glottolog because it uses individual variety codes instead. Some eBible translations likely use those ISO codes. Should the
+  helper script warn about these and leave family_name empty, or should we add a small override table (similar to country_code_overrides.csv) that maps known macrolanguage codes to a Glottolog family?
+  3. --filter-contains: should it be a distinct flag from --filter (explicit, no ambiguity), or should --filter detect automatically whether the column contains slash-separated paths and use substring
+  matching?
+
+✻ Worked for 3m 32s
+
+※ recap: Designing Phase 2 of the ebible dataloader feature — specifically how to include Glottolog language family data for flexible filtering. Waiting for answers to three questions about the
+  classification column design, macrolanguage handling, and filter syntax.
+
+❯ 1. This revised approach is ideal.  — family_name + classification (full path), no subfamily_name will work very well for the filtering I have in mind. Can we add --contains as a flag on the --filter       flags rather than a specific --filter_contains (which sounds like its the filter that contains the data).    Then --filter --contains family_name Indo  and --filter  family_name Indo-European would both  
+  find Indo-European languages (though the first could find more). 2. Yes, I think we should add a small override table to map any macrolanguage codes used in the ebible data to a different ISO 639-3 code  
+  and therefore to a different Glottolog code. The overridding ISO 639-3 code can go in the usual languageCode column and we can add an ebible_original_language_code column to the end of the                
+  ebible_status.csv that holds the original languageCode from eBible.  3. Make the --contains flag explict.  I'm not sure the best way to do that --filter --contains is like a flag on a flag and is         
+  specific to that one --filter.  --filter can be repeated on the command line, so some may be matching substrings and some matching the whole.  I wonder about a script with subcommands, but I'm not sure   
+  that makes it any easier.  ultrathink.                                                                                                                                                                      
+                                          
+● Let me think through the filter syntax design very carefully before recommending anything, because this shapes the whole dataloader interface.                                                              
+                                         
+  ---                                                                                                                                                                                                           The core constraint you've identified
+                                                                                                                                                                                                                --filter --contains is genuinely awkward because argparse sees --contains as a separate boolean flag, not a modifier on the preceding --filter. You'd have to parse them in sequence manually, and the
+  semantics on a repeated command line (--filter a b --filter --contains c d) become ambiguous.
+
+  The right framing is: --filter needs to carry its own match type per instance. That means the match type belongs inside the --filter argument, not as a separate flag alongside it.
+
+  ---
+  Recommended syntax: natural-language operator as the second token
+
+  --filter COLUMN [OPERATOR] VALUE [VALUE ...]
+
+  Where OPERATOR is one of a small reserved set: is, contains, not, in. If the second token is not a reserved operator, it's treated as a value and is (exact match) is assumed.
+
+  --filter family_name "Indo-European"          # exact (backward compat, implied 'is')
+  --filter family_name is "Indo-European"       # explicit exact
+  --filter classification contains Germanic      # substring
+  --filter countryCode in GB DE FR              # one of (same as multiple values)
+  --filter translationId not engKJV             # not equal
+  --filter Redistributable True                 # exact
+
+  This reads naturally, one filter per --filter, and multiple --filter flags are AND-combined as before. The reserved word set (is, contains, not, in) is small enough that column names or values will not
+  collide with it in practice, and it's easy to document.
+
+  Your two examples become:
+  - --filter classification contains Indo → finds anything with "Indo" in the path (picks up Indo-European, Indo-Aryan, etc.)
+  - --filter family_name "Indo-European" → exact match
+
+  ---
+  Subcommand architecture
+
+  You asked about subcommands. My view: yes, use them — not to solve the --contains problem (the operator syntax solves that), but because the tool has genuinely distinct operations that have different
+  required arguments:
+
+  python dataloader.py filter  [...]   # inspect what's in a filtered slice
+  python dataloader.py load    [...]   # load text data into memory / save to disk
+  python dataloader.py split   [...]   # apply train/test/val splits
+
+  The --filter, --custom_filter, and --join-on flags live on a shared parent parser, so they're available across all subcommands without repetition. This is the standard argparse parents= pattern and
+  matches how tools like git, docker, and aws work.
+
+  ---
+  Macrolanguage overrides: isolate in the helper script
+
+  On question 2 — I'd push back gently on modifying languageCode in ebible_status.csv. Here's why: ara (Arabic) and zho (Chinese) are macrolanguage codes that cover genuinely distinct varieties in eBible.
+  Different Arabic translations (arq, arz, arb, etc.) are all tagged ara, and replacing them all with arb would be a wrong approximation for many of them. The same for Chinese.
+
+  The cleaner design isolates the Glottolog lookup problem inside the helper script:
+
+  - get_glottolog_families.py has a small macrolanguage_overrides.csv (columns: ebible_languageCode, glottolog_lookup_code, notes)
+  - The script uses glottolog_lookup_code internally for the Glottolog lookup, but writes the original eBible languageCode as the join key in the output
+  - glottolog_families.csv then joins correctly on languageCode
+  - ebible_status.csv is unchanged
+  - No ebible_original_language_code column needed
+
+  If a macro code maps to multiple possible varieties (like zho), we pick the most common one as a best-effort label and document the limitation. The user will see family_name = "Sino-Tibetan" and
+  classification = "Sino-Tibetan/..." which is correct regardless of which Chinese variety it actually is.
+
+  ---
+  Full settled Phase 2 design
+
+  ┌───────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────┐
+  │             Decision              │                                    Resolution                                     │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Language family source            │ Glottolog 5.3, languoid.csv download                                              │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Columns in glottolog_families.csv │ languageCode, glottocode, family_name, classification (slash-separated ancestors) │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ No subfamily_name                 │ Dropped — tree depth is inconsistent across families                              │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Macrolanguage overrides           │ In helper script only; ebible_status.csv unchanged                                │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Committed to assets/              │ Yes, CC BY 4.0 allows it with attribution                                         │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Runtime dependency                │ None — corpus_to_parquet.py not modified                                          │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Columns in glottolog_families.csv │ languageCode, glottocode, family_name, classification (slash-separated ancestors) │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ No subfamily_name                 │ Dropped — tree depth is inconsistent across families                              │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Macrolanguage overrides           │ In helper script only; ebible_status.csv unchanged                                │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Committed to assets/              │ Yes, CC BY 4.0 allows it with attribution                                         │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Runtime dependency                │ None — corpus_to_parquet.py not modified                                          │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Filter syntax                     │ --filter COLUMN [OPERATOR] VALUE [VALUE ...] with operators is, contains, not, in │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Script structure                  │ Subcommands (filter, load, split) with shared filter parent parser                │
+  ├───────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────┤
+  │ Script location                   │ ebible_code/get_glottolog_families.py                                             │
+  └───────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────┘
+
+  ---
+  Three quick confirmations before I write the Phase 2 spec and update dataloader.md:
+
+  1. --join-on scope: does --join-on apply per --custom_filter file, or is it a single global setting for the whole command? (If a user provides two --custom_filter files with different join keys, they'd
+  need one --join-on per file.)
+  2. glottolog_families.csv attribution: should the attribution line go in a companion assets/ATTRIBUTION.md file (covers all assets), or as a header comment in the CSV itself (non-standard but readable)?
+  3. Phase 2 boundary: is Phase 2 just the get_glottolog_families.py script + glottolog_families.csv, with the --filter operator syntax and --join-on flag belonging to Phase 3 (the dataloader)? That feels
+  like the right split — Phase 2 produces the data asset, Phase 3 builds the tool that uses it.
